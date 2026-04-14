@@ -1,5 +1,5 @@
-import { SignIn } from "@clerk/nextjs";
-import { ShieldCheck, Stethoscope, TimerReset } from "lucide-react";
+import { SignUp } from "@clerk/nextjs";
+import { ClipboardCheck, Hospital, UserRoundPlus } from "lucide-react";
 
 import {
   Card,
@@ -9,22 +9,22 @@ import {
   CardTitle
 } from "@/components/ui/card";
 
-const signInBenefits = [
+const onboardingPoints = [
   {
-    title: "Reception flow",
-    description: "Move quickly between walk-ins, queue state, and priority overrides."
+    title: "Invite-aware access",
+    description: "Your clinic invite determines the role and clinic assignment."
   },
   {
-    title: "Doctor readiness",
-    description: "Keep the next-patient view and clinic context one click away."
+    title: "Fast desktop setup",
+    description: "Create your account once and keep using the same workstation."
   },
   {
-    title: "Foundation access",
-    description: "Use the Phase 1 environment with local Supabase and GlitchTip already wired."
+    title: "Practice-ready routing",
+    description: "Doctors and reception staff land in their own workspace automatically."
   }
 ];
 
-export default async function SignInPage({
+export default async function SignUpPage({
   searchParams
 }: {
   searchParams: Promise<{ redirect_url?: string }>;
@@ -38,35 +38,34 @@ export default async function SignInPage({
         <Card className="overflow-hidden border-primary/20 bg-[linear-gradient(160deg,rgba(19,78,74,0.97),rgba(27,111,103,0.88))] text-primary-foreground">
           <CardHeader className="space-y-4">
             <p className="text-sm uppercase tracking-[0.25em] text-primary-foreground/70">
-              QCare Access
+              Staff onboarding
             </p>
             <CardTitle className="max-w-xl text-4xl leading-tight sm:text-5xl">
-              Sign in to enter the clinic operating console.
+              Create your QCare account and enter the clinic workspace.
             </CardTitle>
             <CardDescription className="max-w-lg text-base text-primary-foreground/80">
-              Reception, doctor, and clinic-admin paths all start here. We keep
-              the sign-in experience simple so staff can get back to the queue
-              fast.
+              This sign-up flow is invite-backed, so the system already knows
+              whether you should land as a receptionist or doctor.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-3">
             <div className="rounded-3xl border border-white/15 bg-white/10 p-4">
-              <ShieldCheck className="h-6 w-6 text-white" />
-              <p className="mt-3 text-sm font-semibold">Secure staff access</p>
+              <UserRoundPlus className="h-6 w-6 text-white" />
+              <p className="mt-3 text-sm font-semibold">Account creation</p>
             </div>
             <div className="rounded-3xl border border-white/15 bg-white/10 p-4">
-              <TimerReset className="h-6 w-6 text-white" />
-              <p className="mt-3 text-sm font-semibold">Fast local testing</p>
+              <ClipboardCheck className="h-6 w-6 text-white" />
+              <p className="mt-3 text-sm font-semibold">Role assignment</p>
             </div>
             <div className="rounded-3xl border border-white/15 bg-white/10 p-4">
-              <Stethoscope className="h-6 w-6 text-white" />
-              <p className="mt-3 text-sm font-semibold">Clinic-first workflow</p>
+              <Hospital className="h-6 w-6 text-white" />
+              <p className="mt-3 text-sm font-semibold">Clinic access</p>
             </div>
           </CardContent>
         </Card>
 
         <div className="grid gap-4 md:grid-cols-3">
-          {signInBenefits.map((item) => (
+          {onboardingPoints.map((item) => (
             <Card key={item.title} className="bg-card/75">
               <CardHeader className="space-y-2">
                 <CardTitle className="text-base">{item.title}</CardTitle>
@@ -80,19 +79,18 @@ export default async function SignInPage({
       <section className="flex items-center justify-center">
         <Card className="w-full max-w-md bg-card/90">
           <CardHeader className="space-y-2">
-            <CardTitle>Team sign in</CardTitle>
+            <CardTitle>Create staff account</CardTitle>
             <CardDescription>
-              Continue to QCare and return to your destination after
-              authentication.
+              Finish sign-up and we will return you to your clinic invite flow.
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
             <div className="rounded-[1.25rem] border border-border/70 bg-background/80 p-3">
-              <SignIn
-                path="/sign-in"
+              <SignUp
+                path="/sign-up"
                 routing="path"
                 forceRedirectUrl={redirectUrl}
-                signUpUrl="/sign-up"
+                signInUrl="/sign-in"
                 appearance={{
                   elements: {
                     card: "shadow-none border-0 bg-transparent",

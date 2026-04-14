@@ -26,6 +26,8 @@ export type MessageDeliveryStatus =
   | "delivered"
   | "failed"
   | "undelivered";
+export type InviteStatus = "pending" | "accepted" | "expired" | "revoked";
+export type InviteDeliveryStatus = "pending" | "sent" | "failed";
 
 export interface Clinic {
   id: string;
@@ -153,4 +155,23 @@ export interface CurrentClinicUser {
   email: string | null;
   firstName: string | null;
   lastName: string | null;
+}
+
+export interface StaffInvite {
+  id: string;
+  clinic_id: string;
+  invite_code: string;
+  role: Exclude<AppRole, "clinic_admin">;
+  invitee_name: string | null;
+  invitee_email: string | null;
+  invited_by_clerk_id: string;
+  doctor_id: string | null;
+  status: InviteStatus;
+  delivery_status: InviteDeliveryStatus;
+  delivery_error: string | null;
+  accepted_by_clerk_id: string | null;
+  expires_at: string;
+  accepted_at: string | null;
+  sent_at: string | null;
+  created_at: string;
 }

@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+const optionalUrl = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().url().optional()
+);
+const optionalEmail = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().email().optional()
+);
+
 const serverEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().min(1),
@@ -8,13 +17,19 @@ const serverEnvSchema = z.object({
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   SUPABASE_DB_URL: z.string().min(1).optional(),
+  RESEND_API_KEY: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.string().optional()
+  ),
+  QCARE_INVITE_FROM_EMAIL: optionalEmail,
+  QCARE_INVITE_REPLY_TO_EMAIL: optionalEmail,
   GLITCHTIP_DSN: z.string().optional(),
   NEXT_PUBLIC_GLITCHTIP_DSN: z.string().optional(),
-  GLITCHTIP_SECURITY_ENDPOINT: z.string().url().optional(),
-  NEXT_PUBLIC_GLITCHTIP_SECURITY_ENDPOINT: z.string().url().optional(),
+  GLITCHTIP_SECURITY_ENDPOINT: optionalUrl,
+  NEXT_PUBLIC_GLITCHTIP_SECURITY_ENDPOINT: optionalUrl,
   POSTHOG_KEY: z.string().optional(),
   NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
-  NEXT_PUBLIC_POSTHOG_HOST: z.string().url().default("https://us.i.posthog.com"),
+  NEXT_PUBLIC_POSTHOG_HOST: optionalUrl.default("https://us.i.posthog.com"),
   QCARE_DEFAULT_CLINIC_ID: z.string().uuid().optional(),
   QCARE_DEFAULT_DOCTOR_ID: z.string().uuid().optional()
 });

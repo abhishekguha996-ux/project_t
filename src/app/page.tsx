@@ -56,6 +56,9 @@ export default function HomePage() {
             <Button asChild className="bg-accent text-accent-foreground hover:bg-accent/90">
               <Link href="/doctor">Open Doctor Placeholder</Link>
             </Button>
+            <Button asChild variant="outline" className="border-white/30 bg-white/10 text-white hover:bg-white/20">
+              <Link href="/admin">Open Admin Onboarding</Link>
+            </Button>
           </CardContent>
         </Card>
 
@@ -72,6 +75,7 @@ export default function HomePage() {
             <p>3. Clerk role contract and protected route scaffolding</p>
             <p>4. Shared TypeScript domain model</p>
             <p>5. GlitchTip and PostHog instrumentation baseline</p>
+            <p>6. Invite-based staff onboarding and admin-doctor linkage</p>
           </CardContent>
         </Card>
       </section>

@@ -1,14 +1,19 @@
 import { z } from "zod";
 
+const optionalUrl = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().url().optional()
+);
+
 const clientEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: z.string().min(1),
   NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
   NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1),
   NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
-  NEXT_PUBLIC_POSTHOG_HOST: z.string().url().optional(),
+  NEXT_PUBLIC_POSTHOG_HOST: optionalUrl,
   NEXT_PUBLIC_GLITCHTIP_DSN: z.string().optional(),
-  NEXT_PUBLIC_GLITCHTIP_SECURITY_ENDPOINT: z.string().url().optional()
+  NEXT_PUBLIC_GLITCHTIP_SECURITY_ENDPOINT: optionalUrl
 });
 
 export function getClientEnv() {

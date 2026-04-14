@@ -2,6 +2,7 @@ import { auth, clerkClient, currentUser } from "@clerk/nextjs/server";
 
 import { isAppRole } from "@/lib/auth/roles";
 import type { CurrentClinicUser } from "@/lib/utils/types";
+export { generateInviteCode } from "@/lib/invites";
 
 type ClerkMetadata = {
   clinic_id?: string;

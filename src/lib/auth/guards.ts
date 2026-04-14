@@ -1,7 +1,8 @@
 import { notFound, redirect } from "next/navigation";
 
+import { getLinkedDoctorProfile } from "@/lib/doctor-access";
 import { getCurrentClinicUser } from "@/lib/auth/current-user";
-import type { AppRole, CurrentClinicUser } from "@/lib/utils/types";
+import type { AppRole, CurrentClinicUser, Doctor } from "@/lib/utils/types";
 
 export async function requireClinicUser(
   redirectUrl = "/"
@@ -28,4 +29,23 @@ export async function requireRole(
   }
 
   return user;
+}
+
+export async function requireDoctorAccess(redirectUrl = "/doctor"): Promise<{
+  user: CurrentClinicUser;
+  doctor: Doctor;
+}> {
+  const user = await requireClinicUser(redirectUrl);
+
+  if (user.role !== "doctor" && user.role !== "clinic_admin") {
+    notFound();
+  }
+
+  const doctor = await getLinkedDoctorProfile(user);
+
+  if (!doctor) {
+    notFound();
+  }
+
+  return { user, doctor };
 }
