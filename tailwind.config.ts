@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 const config: Config = {
   darkMode: ["class"],
@@ -13,6 +14,7 @@ const config: Config = {
         popover: "hsl(var(--popover))",
         "popover-foreground": "hsl(var(--popover-foreground))",
         primary: "hsl(var(--primary))",
+        "primary-hover": "hsl(var(--primary-hover))",
         "primary-foreground": "hsl(var(--primary-foreground))",
         secondary: "hsl(var(--secondary))",
         "secondary-foreground": "hsl(var(--secondary-foreground))",
@@ -32,11 +34,12 @@ const config: Config = {
         sm: "calc(var(--radius) - 4px)"
       },
       fontFamily: {
-        sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"]
+        sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "monospace"]
       }
     }
   },
-  plugins: [require("tailwindcss-animate")]
+  plugins: [tailwindcssAnimate]
 };
 
 export default config;

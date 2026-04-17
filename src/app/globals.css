@@ -3,27 +3,80 @@
 @tailwind utilities;
 
 :root {
-  --background: 48 33% 96%;
-  --foreground: 155 27% 13%;
+  --background: 220 33% 98%;
+  --foreground: 224 78% 16%;
   --card: 0 0% 100%;
-  --card-foreground: 155 27% 13%;
+  --card-foreground: 224 78% 16%;
   --popover: 0 0% 100%;
-  --popover-foreground: 155 27% 13%;
-  --primary: 154 58% 22%;
-  --primary-foreground: 48 33% 96%;
-  --secondary: 42 56% 88%;
-  --secondary-foreground: 155 27% 13%;
-  --muted: 42 30% 92%;
-  --muted-foreground: 150 9% 35%;
-  --accent: 15 82% 57%;
-  --accent-foreground: 48 33% 96%;
-  --destructive: 0 84% 60%;
-  --destructive-foreground: 48 33% 96%;
-  --border: 145 15% 84%;
-  --input: 145 15% 84%;
-  --ring: 154 58% 22%;
-  --radius: 0.9rem;
-  --font-sans: "Manrope";
+  --popover-foreground: 224 78% 16%;
+  --primary: 238 80% 64%;
+  --primary-hover: 238 80% 58%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 223 45% 97%;
+  --secondary-foreground: 224 32% 33%;
+  --muted: 223 42% 95%;
+  --muted-foreground: 221 16% 49%;
+  --accent: 233 100% 96%;
+  --accent-foreground: 239 65% 53%;
+  --destructive: 0 75% 58%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 222 38% 91%;
+  --input: 222 38% 91%;
+  --ring: 238 80% 64%;
+  --radius: 1.25rem;
+  --font-sans: "Inter";
+  --font-mono: "JetBrains Mono";
+  color-scheme: light;
+}
+
+.dark {
+  --background: 230 28% 9%;
+  --foreground: 220 29% 95%;
+  --card: 228 25% 14%;
+  --card-foreground: 220 29% 95%;
+  --popover: 228 25% 14%;
+  --popover-foreground: 220 29% 95%;
+  --primary: 237 78% 69%;
+  --primary-hover: 237 72% 64%;
+  --primary-foreground: 224 78% 16%;
+  --secondary: 229 20% 18%;
+  --secondary-foreground: 220 20% 88%;
+  --muted: 229 18% 18%;
+  --muted-foreground: 222 16% 67%;
+  --accent: 233 38% 24%;
+  --accent-foreground: 225 16% 95%;
+  --destructive: 0 79% 63%;
+  --destructive-foreground: 225 16% 95%;
+  --border: 229 19% 24%;
+  --input: 229 19% 24%;
+  --ring: 237 78% 69%;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 230 28% 9%;
+    --foreground: 220 29% 95%;
+    --card: 228 25% 14%;
+    --card-foreground: 220 29% 95%;
+    --popover: 228 25% 14%;
+    --popover-foreground: 220 29% 95%;
+    --primary: 237 78% 69%;
+    --primary-hover: 237 72% 64%;
+    --primary-foreground: 224 78% 16%;
+    --secondary: 229 20% 18%;
+    --secondary-foreground: 220 20% 88%;
+    --muted: 229 18% 18%;
+    --muted-foreground: 222 16% 67%;
+    --accent: 233 38% 24%;
+    --accent-foreground: 225 16% 95%;
+    --destructive: 0 79% 63%;
+    --destructive-foreground: 225 16% 95%;
+    --border: 229 19% 24%;
+    --input: 229 19% 24%;
+    --ring: 237 78% 69%;
+    color-scheme: dark;
+  }
 }
 
 * {
@@ -33,10 +86,78 @@
 body {
   @apply bg-background text-foreground antialiased;
   background-image:
-    radial-gradient(circle at top, rgba(19, 78, 74, 0.14), transparent 28%),
-    linear-gradient(180deg, rgba(249, 245, 234, 0.96), rgba(255, 252, 244, 1));
+    radial-gradient(circle at 86% 8%, rgba(99, 102, 241, 0.1), transparent 36%),
+    radial-gradient(circle at 8% -14%, rgba(129, 140, 248, 0.07), transparent 35%),
+    linear-gradient(180deg, #fbfbfd 0%, #f6f8fe 100%);
 }
 
 a {
   @apply text-inherit no-underline;
+}
+
+@layer base {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    letter-spacing: -0.03em;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply rounded-xl border border-input bg-card/95 text-foreground placeholder:text-muted-foreground;
+  }
+
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply outline-none ring-2 ring-ring/25 border-primary;
+  }
+}
+
+@layer components {
+  .qcare-hero {
+    @apply overflow-hidden border text-foreground;
+    border-color: rgba(255, 255, 255, 0.95);
+    background:
+      radial-gradient(circle at 8% 5%, rgba(99, 102, 241, 0.18), transparent 45%),
+      radial-gradient(circle at 86% 16%, rgba(16, 185, 129, 0.12), transparent 50%),
+      linear-gradient(
+        145deg,
+        rgba(255, 255, 255, 0.94),
+        rgba(247, 249, 255, 0.95) 44%,
+        rgba(243, 247, 255, 0.96)
+      );
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.04),
+      0 18px 40px -24px rgba(79, 70, 229, 0.4);
+  }
+
+  .qcare-panel {
+    @apply rounded-[32px] border bg-white/90 backdrop-blur-xl;
+    border-color: rgba(255, 255, 255, 0.9);
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.04),
+      0 24px 48px -24px rgba(15, 23, 42, 0.22);
+  }
+
+  .qcare-panel-soft {
+    @apply rounded-3xl border border-border/80 bg-white/75 backdrop-blur-lg;
+    box-shadow:
+      0 1px 2px rgba(16, 24, 40, 0.03),
+      0 18px 36px -30px rgba(15, 23, 42, 0.2);
+  }
+
+  .qcare-kicker {
+    @apply text-[10px] font-bold uppercase tracking-[0.2em] text-muted-foreground;
+  }
+
+  .qcare-pill {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em];
+    background: linear-gradient(135deg, #eef2ff 0%, #f8faff 100%);
+    color: #4f46e5;
+  }
 }

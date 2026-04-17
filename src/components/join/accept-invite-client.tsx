@@ -65,7 +65,7 @@ export function AcceptInviteClient({ code }: { code: string }) {
   }, [code, router]);
 
   return (
-    <Card className="w-full max-w-xl bg-card/90">
+    <Card className="w-full max-w-xl">
       <CardHeader>
         <CardTitle>
           {state.status === "loading"

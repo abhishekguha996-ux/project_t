@@ -1,0 +1,416 @@
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+import { getCurrentClinicUser } from "@/lib/auth/current-user";
+import { getLinkedDoctorProfile } from "@/lib/doctor-access";
+import { getServerEnv } from "@/lib/env/server";
+import { notifyPatientStatusUpdate } from "@/lib/notifications/patient-updates";
+import {
+  clearExpiredQueuePauses,
+  completeQueueToken,
+  expireOverdueHoldSlots,
+  getActiveQueuePause,
+  holdQueueToken,
+  type QueueActionActor,
+  type DoctorQueuePauseRecord,
+  startQueueToken,
+  transitionQueueToken,
+  type QueueTokenRecord
+} from "@/lib/queue/status-actions";
+import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
+import type { AppRole, TokenStatus } from "@/lib/utils/types";
+
+const queueActionSchema = z.object({
+  action: z.enum(["start", "done", "skip", "step_out"]),
+  tokenId: z.string().uuid().optional(),
+  doctorId: z.string().uuid().optional(),
+  holdMinutes: z.number().int().min(1).max(120).optional(),
+  holdNote: z.string().trim().min(1).max(500).optional()
+});
+
+type QueueTokenRow = QueueTokenRecord & {
+  patients: { name?: string | null; phone?: string | null } | null;
+  doctors: { name?: string | null; status?: string | null } | null;
+  checkout: {
+    checkout_stage: string;
+    payment_status: string;
+    pharmacy_status: string;
+    lab_status: string;
+    closed_at: string | null;
+  } | null;
+};
+
+type RawQueueTokenRow = QueueTokenRecord & {
+  patients:
+    | { name?: string | null; phone?: string | null }
+    | Array<{ name?: string | null; phone?: string | null }>
+    | null;
+  doctors:
+    | { name?: string | null; status?: string | null }
+    | Array<{ name?: string | null; status?: string | null }>
+    | null;
+};
+
+function unwrapRelation<T>(value: T | T[] | null): T | null {
+  if (!value) {
+    return null;
+  }
+  return Array.isArray(value) ? value[0] ?? null : value;
+}
+
+function canAccessQueue(role: AppRole) {
+  return role === "clinic_admin" || role === "receptionist" || role === "doctor";
+}
+
+function canMutateQueue(role: AppRole) {
+  return role === "clinic_admin" || role === "doctor" || role === "receptionist";
+}
+
+function getTodayDate() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+async function resolveMutationDoctorId(
+  role: AppRole,
+  user: Awaited<ReturnType<typeof getCurrentClinicUser>>
+) {
+  if (!user) {
+    return null;
+  }
+
+  if (role !== "clinic_admin" && role !== "doctor") {
+    return null;
+  }
+
+  const linkedDoctor = await getLinkedDoctorProfile(user);
+  return linkedDoctor?.id ?? null;
+}
+
+export async function GET(request: Request) {
+  const user = await getCurrentClinicUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!canAccessQueue(user.role)) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
+  const searchParams = new URL(request.url).searchParams;
+  const requestedDoctorId = searchParams.get("doctorId")?.trim() || null;
+  const today = getTodayDate();
+  const supabase = getSupabaseServiceRoleClient();
+  let effectiveDoctorId: string | null = requestedDoctorId;
+
+  if (user.role === "doctor") {
+    const linkedDoctorId = await resolveMutationDoctorId(user.role, user);
+    if (!linkedDoctorId) {
+      return NextResponse.json(
+        { error: "Doctor account is not linked to a doctor profile." },
+        { status: 409 }
+      );
+    }
+    effectiveDoctorId = linkedDoctorId;
+  }
+
+  await clearExpiredQueuePauses({
+    supabase,
+    clinicId: user.clinicId,
+    doctorId: effectiveDoctorId ?? undefined
+  });
+  await expireOverdueHoldSlots({
+    supabase,
+    clinicId: user.clinicId,
+    doctorId: effectiveDoctorId ?? undefined,
+    date: today
+  });
+
+  let query = supabase
+    .from("tokens")
+    .select(
+      "id, token_number, status, urgency, type, checkin_channel, checked_in_at, serving_started_at, raw_complaint, patient_id, doctor_id, completed_at, consult_duration_seconds, created_at, date, clinic_id, hold_until, hold_note, hold_set_by_role, hold_set_by_clerk_id, patients(name, phone), doctors(name, status)"
+    )
+    .eq("clinic_id", user.clinicId)
+    .eq("date", today)
+    .order("token_number", { ascending: true });
+
+  if (effectiveDoctorId) {
+    query = query.eq("doctor_id", effectiveDoctorId);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    return NextResponse.json(
+      { error: "Failed to load queue status." },
+      { status: 500 }
+    );
+  }
+
+  const queueRaw = (data as unknown as RawQueueTokenRow[] | null) ?? [];
+  const tokenIds = queueRaw.map((item) => item.id);
+  let checkoutByTokenId = new Map<string, QueueTokenRow["checkout"]>();
+  if (tokenIds.length > 0) {
+    const { data: checkoutRows } = await supabase
+      .from("token_checkout")
+      .select("token_id, checkout_stage, payment_status, pharmacy_status, lab_status, closed_at")
+      .in("token_id", tokenIds);
+
+    checkoutByTokenId = new Map(
+      ((checkoutRows as Array<{
+        token_id: string;
+        checkout_stage: string;
+        payment_status: string;
+        pharmacy_status: string;
+        lab_status: string;
+        closed_at: string | null;
+      }> | null) ?? []).map((row) => [
+        row.token_id,
+        {
+          checkout_stage: row.checkout_stage,
+          payment_status: row.payment_status,
+          pharmacy_status: row.pharmacy_status,
+          lab_status: row.lab_status,
+          closed_at: row.closed_at
+        }
+      ])
+    );
+  }
+
+  const queue: QueueTokenRow[] = queueRaw.map((item) => ({
+    ...item,
+    patients: unwrapRelation(item.patients),
+    doctors: unwrapRelation(item.doctors),
+    checkout: checkoutByTokenId.get(item.id) ?? null
+  }));
+  const summary = queue.reduce(
+    (accumulator, item) => {
+      accumulator.total += 1;
+      if (item.status === "waiting") accumulator.waiting += 1;
+      if (item.status === "serving") accumulator.serving += 1;
+      if (item.status === "complete") accumulator.complete += 1;
+      if (item.status === "skipped") accumulator.skipped += 1;
+      if (item.status === "stepped_out") accumulator.steppedOut += 1;
+      return accumulator;
+    },
+    {
+      total: 0,
+      waiting: 0,
+      serving: 0,
+      complete: 0,
+      skipped: 0,
+      steppedOut: 0
+    }
+  );
+
+  const currentServing = queue.find((item) => item.status === "serving") ?? null;
+  const nextWaiting = queue.find((item) => item.status === "waiting") ?? null;
+  let activePause: DoctorQueuePauseRecord | null = null;
+  if (effectiveDoctorId) {
+    activePause = await getActiveQueuePause({
+      supabase,
+      clinicId: user.clinicId,
+      doctorId: effectiveDoctorId
+    });
+  }
+
+  return NextResponse.json({
+    ok: true,
+    clinicId: user.clinicId,
+    date: today,
+    doctorId: effectiveDoctorId,
+    queue,
+    summary,
+    currentServing,
+    nextWaiting,
+    queuePaused: Boolean(activePause),
+    queuePause: activePause,
+    now: new Date().toISOString()
+  });
+}
+
+export async function POST(request: Request) {
+  const user = await getCurrentClinicUser();
+
+  if (!user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  if (!canMutateQueue(user.role)) {
+    return NextResponse.json(
+      { error: "Only doctor users can mutate queue status." },
+      { status: 403 }
+    );
+  }
+
+  const parsed = queueActionSchema.safeParse(await request.json().catch(() => null));
+
+  if (!parsed.success) {
+    return NextResponse.json({ error: "Invalid queue action payload." }, { status: 400 });
+  }
+
+  const actorDoctorId = await resolveMutationDoctorId(user.role, user);
+  let effectiveDoctorId = actorDoctorId;
+  if (user.role === "doctor") {
+    if (!actorDoctorId) {
+      return NextResponse.json(
+        { error: "Your account must be linked to a doctor profile." },
+        { status: 409 }
+      );
+    }
+    if (parsed.data.doctorId && parsed.data.doctorId !== actorDoctorId) {
+      return NextResponse.json(
+        { error: "You can only modify your linked doctor queue." },
+        { status: 403 }
+      );
+    }
+  } else {
+    effectiveDoctorId = parsed.data.doctorId ?? null;
+    if (!effectiveDoctorId) {
+      return NextResponse.json(
+        { error: "Doctor id is required for receptionist/admin queue actions." },
+        { status: 400 }
+      );
+    }
+  }
+
+  const scope = {
+    clinicId: user.clinicId,
+    doctorId: effectiveDoctorId as string,
+    date: getTodayDate()
+  };
+  const supabase = getSupabaseServiceRoleClient();
+  const env = getServerEnv();
+  const actor: QueueActionActor = {
+    clerkUserId: user.clerkUserId,
+    role: user.role
+  };
+
+  await clearExpiredQueuePauses({
+    supabase,
+    clinicId: user.clinicId,
+    doctorId: scope.doctorId
+  });
+  await expireOverdueHoldSlots({
+    supabase,
+    clinicId: user.clinicId,
+    doctorId: scope.doctorId,
+    date: scope.date
+  });
+
+  let result:
+    | Awaited<ReturnType<typeof startQueueToken>>
+    | Awaited<ReturnType<typeof completeQueueToken>>
+    | Awaited<ReturnType<typeof transitionQueueToken>>
+    | Awaited<ReturnType<typeof holdQueueToken>>;
+
+  if (parsed.data.action === "start") {
+    result = await startQueueToken({
+      supabase,
+      scope,
+      tokenId: parsed.data.tokenId,
+      actor
+    });
+  } else if (parsed.data.action === "done") {
+    result = await completeQueueToken({
+      supabase,
+      scope,
+      tokenId: parsed.data.tokenId,
+      actor
+    });
+  } else if (parsed.data.action === "step_out") {
+    if (!parsed.data.tokenId) {
+      return NextResponse.json(
+        { error: "Token id is required for this action." },
+        { status: 400 }
+      );
+    }
+
+    const holdNote = parsed.data.holdNote?.trim() ?? "";
+    if (user.role === "receptionist" && holdNote.length < 8) {
+      return NextResponse.json(
+        {
+          error:
+            "Receptionist Hold slot requires a note (minimum 8 characters)."
+        },
+        { status: 400 }
+      );
+    }
+
+    result = await holdQueueToken({
+      supabase,
+      scope,
+      tokenId: parsed.data.tokenId,
+      holdMinutes: parsed.data.holdMinutes ?? env.QCARE_DEFAULT_HOLD_SLOT_MINUTES,
+      holdNote:
+        holdNote ||
+        (user.role === "doctor"
+          ? "Doctor marked Hold slot."
+          : "Hold slot applied by clinic admin."),
+      actor
+    });
+  } else {
+    if (!parsed.data.tokenId) {
+      return NextResponse.json(
+        { error: "Token id is required for this action." },
+        { status: 400 }
+      );
+    }
+
+    const targetStatus: TokenStatus =
+      parsed.data.action === "skip" ? "skipped" : "stepped_out";
+
+    result = await transitionQueueToken({
+      supabase,
+      scope,
+      tokenId: parsed.data.tokenId,
+      targetStatus: targetStatus as "skipped" | "stepped_out",
+      actor
+    });
+  }
+
+  if (!result.ok) {
+    return NextResponse.json({ error: result.error }, { status: result.status });
+  }
+
+  try {
+    if (parsed.data.action === "start") {
+      await notifyPatientStatusUpdate({
+        tokenId: result.token.id,
+        event: "your_turn",
+        supabase
+      });
+    } else if (parsed.data.action === "done") {
+      await notifyPatientStatusUpdate({
+        tokenId: result.token.id,
+        event: "consult_complete",
+        supabase
+      });
+    } else if (parsed.data.action === "skip") {
+      await notifyPatientStatusUpdate({
+        tokenId: result.token.id,
+        event: "skipped_noshow",
+        supabase
+      });
+    } else {
+      await notifyPatientStatusUpdate({
+        tokenId: result.token.id,
+        event: "stepped_out_check",
+        supabase
+      });
+    }
+  } catch (error) {
+    console.error(
+      "[QCare] queue notification failed:",
+      error instanceof Error ? error.message : error
+    );
+  }
+
+  return NextResponse.json({
+    ok: true,
+    doctorId: scope.doctorId,
+    token: result.token,
+    message: result.message ?? null
+  });
+}

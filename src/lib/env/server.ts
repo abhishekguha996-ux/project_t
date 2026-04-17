@@ -8,6 +8,41 @@ const optionalEmail = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.string().email().optional()
 );
+const optionalString = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().optional()
+);
+const optionalBooleanWithDefault = (defaultValue: boolean) =>
+  z.preprocess((value) => {
+    if (value === "" || value === undefined) {
+      return defaultValue;
+    }
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "string") {
+      return value.toLowerCase() === "true";
+    }
+    return defaultValue;
+  }, z.boolean());
+const optionalNotificationMode = z.preprocess(
+  (value) => (value === "" || value === undefined ? "dry_run" : value),
+  z.enum(["live", "dry_run"])
+);
+const optionalIntWithDefault = (defaultValue: number) =>
+  z.preprocess((value) => {
+    if (value === "" || value === undefined) {
+      return defaultValue;
+    }
+    if (typeof value === "number") {
+      return value;
+    }
+    if (typeof value === "string") {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : defaultValue;
+    }
+    return defaultValue;
+  }, z.number().int().min(1).max(240));
 
 const serverEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().url(),
@@ -30,6 +65,15 @@ const serverEnvSchema = z.object({
   POSTHOG_KEY: z.string().optional(),
   NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
   NEXT_PUBLIC_POSTHOG_HOST: optionalUrl.default("https://us.i.posthog.com"),
+  TWILIO_ACCOUNT_SID: optionalString,
+  TWILIO_AUTH_TOKEN: optionalString,
+  QCARE_WHATSAPP_FROM: optionalString,
+  QCARE_SMS_FROM: optionalString,
+  QCARE_NOTIFICATIONS_ENABLED: optionalBooleanWithDefault(true),
+  QCARE_NOTIFICATION_MODE: optionalNotificationMode,
+  QCARE_DEFAULT_PHONE_COUNTRY_CODE: optionalString.default("+91"),
+  QCARE_DEFAULT_DOCTOR_PAUSE_MINUTES: optionalIntWithDefault(20),
+  QCARE_DEFAULT_HOLD_SLOT_MINUTES: optionalIntWithDefault(5),
   QCARE_DEFAULT_CLINIC_ID: z.string().uuid().optional(),
   QCARE_DEFAULT_DOCTOR_ID: z.string().uuid().optional()
 });

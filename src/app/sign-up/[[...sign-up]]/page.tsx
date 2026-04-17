@@ -35,30 +35,30 @@ export default async function SignUpPage({
   return (
     <main className="mx-auto grid min-h-screen max-w-6xl gap-8 px-6 py-10 sm:px-8 lg:grid-cols-[1.05fr_0.95fr] lg:px-12">
       <section className="flex flex-col justify-between gap-8">
-        <Card className="overflow-hidden border-primary/20 bg-[linear-gradient(160deg,rgba(19,78,74,0.97),rgba(27,111,103,0.88))] text-primary-foreground">
+        <Card className="qcare-hero">
           <CardHeader className="space-y-4">
-            <p className="text-sm uppercase tracking-[0.25em] text-primary-foreground/70">
+            <p className="qcare-kicker text-[11px]">
               Staff onboarding
             </p>
             <CardTitle className="max-w-xl text-4xl leading-tight sm:text-5xl">
               Create your QCare account and enter the clinic workspace.
             </CardTitle>
-            <CardDescription className="max-w-lg text-base text-primary-foreground/80">
+            <CardDescription className="max-w-lg text-base text-muted-foreground">
               This sign-up flow is invite-backed, so the system already knows
               whether you should land as a receptionist or doctor.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-3">
-            <div className="rounded-3xl border border-white/15 bg-white/10 p-4">
-              <UserRoundPlus className="h-6 w-6 text-white" />
+            <div className="qcare-panel-soft p-4">
+              <UserRoundPlus className="h-6 w-6 text-primary" />
               <p className="mt-3 text-sm font-semibold">Account creation</p>
             </div>
-            <div className="rounded-3xl border border-white/15 bg-white/10 p-4">
-              <ClipboardCheck className="h-6 w-6 text-white" />
+            <div className="qcare-panel-soft p-4">
+              <ClipboardCheck className="h-6 w-6 text-primary" />
               <p className="mt-3 text-sm font-semibold">Role assignment</p>
             </div>
-            <div className="rounded-3xl border border-white/15 bg-white/10 p-4">
-              <Hospital className="h-6 w-6 text-white" />
+            <div className="qcare-panel-soft p-4">
+              <Hospital className="h-6 w-6 text-primary" />
               <p className="mt-3 text-sm font-semibold">Clinic access</p>
             </div>
           </CardContent>
@@ -66,7 +66,7 @@ export default async function SignUpPage({
 
         <div className="grid gap-4 md:grid-cols-3">
           {onboardingPoints.map((item) => (
-            <Card key={item.title} className="bg-card/75">
+            <Card key={item.title} className="qcare-panel-soft">
               <CardHeader className="space-y-2">
                 <CardTitle className="text-base">{item.title}</CardTitle>
                 <CardDescription>{item.description}</CardDescription>
@@ -77,7 +77,7 @@ export default async function SignUpPage({
       </section>
 
       <section className="flex items-center justify-center">
-        <Card className="w-full max-w-md bg-card/90">
+        <Card className="w-full max-w-md">
           <CardHeader className="space-y-2">
             <CardTitle>Create staff account</CardTitle>
             <CardDescription>
@@ -85,7 +85,7 @@ export default async function SignUpPage({
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-2">
-            <div className="rounded-[1.25rem] border border-border/70 bg-background/80 p-3">
+            <div className="qcare-panel-soft rounded-2xl p-3">
               <SignUp
                 path="/sign-up"
                 routing="path"
@@ -98,11 +98,11 @@ export default async function SignUpPage({
                     headerTitle: "hidden",
                     headerSubtitle: "hidden",
                     socialButtonsBlockButton:
-                      "rounded-full border border-border bg-card text-foreground shadow-none",
+                      "rounded-xl border border-border bg-white text-foreground shadow-none h-9 text-[13px]",
                     formButtonPrimary:
-                      "rounded-full bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))] shadow-none hover:bg-[hsl(var(--primary)/0.9)]",
+                      "rounded-full border border-[#4f46e5]/45 bg-[linear-gradient(135deg,#6366f1_0%,#4f46e5_55%,#4338ca_100%)] text-[hsl(var(--primary-foreground))] shadow-[0_1px_2px_rgba(16,24,40,0.06),0_12px_24px_-12px_rgba(79,70,229,0.65)] h-10 text-[13px] hover:brightness-105",
                     formFieldInput:
-                      "rounded-2xl border border-input bg-card text-foreground",
+                      "rounded-xl border border-input bg-white text-foreground h-9 text-[13px]",
                     footerActionLink: "text-primary hover:text-primary/80"
                   }
                 }}

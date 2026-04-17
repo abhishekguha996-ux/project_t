@@ -1,6 +1,9 @@
 begin;
 
 truncate table public.message_log restart identity cascade;
+truncate table public.token_event_log restart identity cascade;
+truncate table public.token_checkout restart identity cascade;
+truncate table public.doctor_queue_pauses restart identity cascade;
 truncate table public.consult_time_log restart identity cascade;
 truncate table public.clinic_daily_stats restart identity cascade;
 truncate table public.tokens restart identity cascade;
@@ -201,6 +204,25 @@ values (
   '44444444-4444-4444-8444-444444444441',
   current_date,
   480
+);
+
+insert into public.token_checkout (
+  token_id,
+  clinic_id,
+  doctor_id,
+  checkout_stage,
+  payment_status,
+  pharmacy_status,
+  lab_status
+)
+values (
+  '44444444-4444-4444-8444-444444444441',
+  '11111111-1111-4111-8111-111111111111',
+  '22222222-2222-4222-8222-222222222222',
+  'awaiting_payment',
+  'pending',
+  'pending',
+  'pending'
 );
 
 insert into public.message_log (

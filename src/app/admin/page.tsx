@@ -7,7 +7,12 @@ import type { Doctor, StaffInvite } from "@/lib/utils/types";
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams
+}: {
+  searchParams: Promise<{ doctor_profile?: string }>;
+}) {
+  const query = await searchParams;
   const user = await requireRole(["clinic_admin"], "/admin");
   const supabase = getSupabaseServiceRoleClient();
   const env = getServerEnv();
@@ -35,19 +40,20 @@ export default async function AdminPage() {
   return (
     <main className="mx-auto max-w-6xl px-6 py-10">
       <div className="mb-6 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
-        <Card className="overflow-hidden border-primary/20 bg-[linear-gradient(160deg,rgba(19,78,74,0.97),rgba(27,111,103,0.88))] text-primary-foreground">
+        <Card className="qcare-hero">
           <CardHeader>
+            <p className="qcare-kicker">Admin workspace</p>
             <CardTitle className="text-3xl">
               Staff onboarding and access control
             </CardTitle>
-            <CardDescription className="max-w-2xl text-base text-primary-foreground/80">
+            <CardDescription className="max-w-2xl text-base text-muted-foreground">
               Create one-time invite links for doctors and receptionists, track
               their status, and handle the common small-clinic case where the
               clinic owner is also the doctor.
             </CardDescription>
           </CardHeader>
         </Card>
-        <Card className="bg-card/85">
+        <Card className="qcare-panel-soft">
           <CardHeader>
             <CardTitle>Clinic admin</CardTitle>
           </CardHeader>
@@ -57,6 +63,16 @@ export default async function AdminPage() {
           </CardContent>
         </Card>
       </div>
+
+      {query.doctor_profile === "missing" ? (
+        <Card className="mb-6 border-amber-300/60 bg-amber-50/80">
+          <CardContent className="pt-6 text-sm text-amber-800">
+            Your account is signed in, but it is not linked to a doctor profile
+            yet. Use &quot;Admin is also doctor&quot; below to link your doctor
+            profile and unlock the doctor workspace.
+          </CardContent>
+        </Card>
+      ) : null}
 
       <InviteManager
         appUrl={env.NEXT_PUBLIC_APP_URL}

@@ -12,10 +12,21 @@ export type TokenStatus =
 export type TokenType = "walkin" | "booked";
 export type TokenUrgency = "normal" | "emergency";
 export type CheckInChannel = "qr" | "reception";
+export type CheckoutStage =
+  | "awaiting_payment"
+  | "payment_done"
+  | "pharmacy_pickup"
+  | "referred_for_lab"
+  | "visit_closed";
+export type PaymentStatus = "pending" | "done" | "not_required";
+export type PharmacyStatus = "pending" | "picked_up" | "not_required";
+export type LabStatus = "pending" | "referred" | "not_required";
+export type QueuePauseReason = "personal_emergency" | "medical_emergency" | "other";
 export type MessageType =
   | "checkin_confirm"
   | "three_ahead"
   | "your_turn"
+  | "consult_complete"
   | "doctor_break"
   | "emergency_delay"
   | "skipped_noshow"
@@ -92,6 +103,10 @@ export interface Token {
   raw_complaint: string | null;
   ai_summary: AISummary | null;
   consult_duration_seconds: number | null;
+  hold_until: string | null;
+  hold_note: string | null;
+  hold_set_by_role: AppRole | null;
+  hold_set_by_clerk_id: string | null;
   created_at: string;
 }
 
@@ -116,6 +131,50 @@ export interface ConsultTimeLog {
   token_id: string;
   date: string;
   duration_seconds: number;
+  created_at: string;
+}
+
+export interface TokenCheckout {
+  token_id: string;
+  clinic_id: string;
+  doctor_id: string;
+  checkout_stage: CheckoutStage;
+  payment_status: PaymentStatus;
+  pharmacy_status: PharmacyStatus;
+  lab_status: LabStatus;
+  notes: string | null;
+  closed_at: string | null;
+  updated_at: string;
+  created_at: string;
+}
+
+export interface DoctorQueuePause {
+  id: string;
+  clinic_id: string;
+  doctor_id: string;
+  reason: QueuePauseReason;
+  note: string | null;
+  starts_at: string;
+  ends_at: string;
+  is_active: boolean;
+  created_by_clerk_id: string;
+  created_by_role: AppRole;
+  ended_at: string | null;
+  ended_by_clerk_id: string | null;
+  created_at: string;
+}
+
+export interface TokenEventLog {
+  id: string;
+  token_id: string;
+  clinic_id: string;
+  doctor_id: string;
+  actor_clerk_id: string | null;
+  actor_role: AppRole | null;
+  action: string;
+  from_state: string | null;
+  to_state: string | null;
+  metadata: Record<string, unknown> | null;
   created_at: string;
 }
 

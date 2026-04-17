@@ -44,6 +44,9 @@ export async function requireDoctorAccess(redirectUrl = "/doctor"): Promise<{
   const doctor = await getLinkedDoctorProfile(user);
 
   if (!doctor) {
+    if (user.role === "clinic_admin") {
+      redirect("/admin?doctor_profile=missing" as never);
+    }
     notFound();
   }
 

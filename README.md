@@ -8,6 +8,8 @@ This repository contains the Phase 1 foundation for QCare inside [`project_t`](.
 - Clerk auth middleware and normalized clinic user helpers
 - Supabase local configuration, initial schema migration, RLS policy pattern, and seed data
 - Resend-backed staff invite emails with delivery tracking and resend support
+- QR patient check-in, receptionist check-in, queue status board, and doctor workflow actions
+- Patient live tracking with token lookup/re-entry support
 - Shared TypeScript domain types for the Phase 1 entities
 - GlitchTip and PostHog instrumentation baseline
 - Protected placeholder routes for `/reception`, `/doctor`, and `/analytics`
@@ -58,6 +60,15 @@ Optional but recommended:
 - `POSTHOG_KEY`
 - `NEXT_PUBLIC_POSTHOG_KEY`
 - `NEXT_PUBLIC_POSTHOG_HOST`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `QCARE_WHATSAPP_FROM`
+- `QCARE_SMS_FROM`
+- `QCARE_NOTIFICATIONS_ENABLED`
+- `QCARE_NOTIFICATION_MODE`
+- `QCARE_DEFAULT_PHONE_COUNTRY_CODE`
+- `QCARE_DEFAULT_DOCTOR_PAUSE_MINUTES`
+- `QCARE_DEFAULT_HOLD_SLOT_MINUTES`
 
 ## Clerk metadata contract
 
@@ -77,12 +88,42 @@ These values are normalized by `src/lib/auth/current-user.ts` before the app con
 - If Resend is not configured locally, QCare still creates the invite and logs the invite link for manual testing, leaving delivery status as `pending`.
 - Invite acceptance is email-bound: the user must sign in to Clerk with the same email address the invite was sent to.
 
+## Patient status notifications
+
+- QCare sends patient status updates through Twilio with channel priority:
+  1. WhatsApp first (`QCARE_WHATSAPP_FROM`)
+  2. SMS fallback (`QCARE_SMS_FROM`)
+- Supported events: check-in confirmation, your turn, consult complete, skipped, and stepped out.
+- Every attempt is logged in `message_log` with delivery status and provider response id.
+- Keep local development safe with:
+  - `QCARE_NOTIFICATION_MODE=dry_run` (default) for log-only behavior.
+  - `QCARE_NOTIFICATION_MODE=live` when Twilio credentials and senders are ready.
+
 ## Supabase notes
 
 - The migration file lives at [`supabase/migrations/001_initial_schema.sql`](./supabase/migrations/001_initial_schema.sql).
 - Invite email delivery fields are added in [`supabase/migrations/003_staff_invite_email_delivery.sql`](./supabase/migrations/003_staff_invite_email_delivery.sql).
+- Queue pause + checkout workflow fields/tables are added in [`supabase/migrations/005_queue_pause_and_checkout.sql`](./supabase/migrations/005_queue_pause_and_checkout.sql).
 - Seed data lives at [`supabase/seed.sql`](./supabase/seed.sql).
 - The patient uniqueness model follows the implementation plan: `(clinic_id, phone, name)`.
+
+## Reception workflow pages
+
+- `/reception/board` full-screen lane board for consultation + checkout actions.
+- `/reception/checkin` quick-add intake view.
+- `/reception/control` operational control center for active holds/pauses and queue event logs.
+
+## Queue model additions
+
+- Doctor queue pause is separate from patient queue status.
+- `Hold slot` uses token status `stepped_out` with hold metadata and expiry.
+- Receptionist-triggered Hold slot requires a mandatory note.
+- `Consultation done` automatically creates/updates checkout state and supports:
+  - awaiting payment
+  - payment done
+  - pharmacy pickup
+  - referred for lab
+  - visit closed
 
 ## What is intentionally not here yet
 

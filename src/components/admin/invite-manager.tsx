@@ -27,6 +27,10 @@ export function InviteManager({
   const [inviteeName, setInviteeName] = useState("");
   const [inviteeEmail, setInviteeEmail] = useState("");
   const [doctorId, setDoctorId] = useState("");
+  const [doctorRecords, setDoctorRecords] = useState(doctors);
+  const [activeLinkedDoctorId, setActiveLinkedDoctorId] = useState<string | null>(
+    linkedDoctorId
+  );
   const [linkDoctorId, setLinkDoctorId] = useState(linkedDoctorId ?? "");
   const [invites, setInvites] = useState(initialInvites);
   const [createdInvite, setCreatedInvite] = useState<{
@@ -38,13 +42,18 @@ export function InviteManager({
   const [message, setMessage] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
-  const availableDoctors = useMemo(
+  const inviteableDoctors = useMemo(
+    () => doctorRecords.filter((doctor) => !doctor.clerk_user_id),
+    [doctorRecords]
+  );
+  const linkableDoctors = useMemo(
     () =>
-      doctors.filter(
+      doctorRecords.filter(
         (doctor) =>
-          !doctor.clerk_user_id || doctor.clerk_user_id === linkedDoctorId
+          !doctor.clerk_user_id ||
+          (activeLinkedDoctorId !== null && doctor.id === activeLinkedDoctorId)
       ),
-    [doctors, linkedDoctorId]
+    [doctorRecords, activeLinkedDoctorId]
   );
 
   async function refreshInvites() {
@@ -188,7 +197,52 @@ export function InviteManager({
         return;
       }
 
+      setDoctorRecords((existingDoctors) =>
+        existingDoctors.map((doctor) =>
+          doctor.id === linkDoctorId
+            ? { ...doctor, clerk_user_id: "__linked_to_current_admin__" }
+            : doctor
+        )
+      );
+      setActiveLinkedDoctorId(linkDoctorId);
       setMessage("Your account is now linked to that doctor profile.");
+    });
+  }
+
+  function handleUnlinkDoctor() {
+    setMessage(null);
+
+    startTransition(async () => {
+      const response = await fetch("/api/account/unlink-doctor", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          doctorId: activeLinkedDoctorId ?? undefined
+        })
+      });
+
+      const payload = (await response.json()) as {
+        error?: string;
+        doctorIds?: string[];
+      };
+
+      if (!response.ok) {
+        setMessage(payload.error ?? "Failed to unlink doctor profile.");
+        return;
+      }
+
+      setDoctorRecords((existingDoctors) =>
+        existingDoctors.map((doctor) =>
+          payload.doctorIds?.includes(doctor.id)
+            ? { ...doctor, clerk_user_id: null }
+            : doctor
+        )
+      );
+      setActiveLinkedDoctorId(null);
+      setLinkDoctorId("");
+      setMessage("Doctor profile unlinked. You can now send a fresh doctor invite.");
     });
   }
 
@@ -200,7 +254,7 @@ export function InviteManager({
   return (
     <div className="grid gap-6">
       <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-        <Card className="bg-card/85">
+        <Card className="qcare-panel-soft">
           <CardHeader>
             <CardTitle>Create staff invite</CardTitle>
           </CardHeader>
@@ -209,7 +263,7 @@ export function InviteManager({
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Role</span>
                 <select
-                  className="h-11 rounded-2xl border border-input bg-card px-4"
+                  className="h-11 rounded-xl border border-input bg-white px-3 text-[13px]"
                   value={role}
                   onChange={(event) =>
                     setRole(event.target.value as "doctor" | "receptionist")
@@ -224,25 +278,32 @@ export function InviteManager({
                 <label className="grid gap-2 text-sm">
                   <span className="font-medium">Doctor profile</span>
                   <select
-                    className="h-11 rounded-2xl border border-input bg-card px-4"
+                    className="h-11 rounded-xl border border-input bg-white px-3 text-[13px]"
                     value={doctorId}
                     onChange={(event) => setDoctorId(event.target.value)}
                     required
                   >
                     <option value="">Select doctor</option>
-                    {availableDoctors.map((doctor) => (
+                    {inviteableDoctors.map((doctor) => (
                       <option key={doctor.id} value={doctor.id}>
                         {doctor.name}
                       </option>
                     ))}
                   </select>
+                  {inviteableDoctors.length === 0 ? (
+                    <span className="text-xs text-muted-foreground">
+                      All doctor profiles are already linked. Invite
+                      receptionists, or add a new doctor profile before sending
+                      another doctor invite.
+                    </span>
+                  ) : null}
                 </label>
               ) : null}
 
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Invitee name</span>
                 <input
-                  className="h-11 rounded-2xl border border-input bg-card px-4"
+                  className="h-11 rounded-xl border border-input bg-white px-3 text-[13px]"
                   value={inviteeName}
                   onChange={(event) => setInviteeName(event.target.value)}
                   placeholder="Dr. Meera Shah"
@@ -252,7 +313,7 @@ export function InviteManager({
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Invitee email</span>
                 <input
-                  className="h-11 rounded-2xl border border-input bg-card px-4"
+                  className="h-11 rounded-xl border border-input bg-white px-3 text-[13px]"
                   value={inviteeEmail}
                   onChange={(event) => setInviteeEmail(event.target.value)}
                   placeholder="meera@clinic.example"
@@ -261,13 +322,16 @@ export function InviteManager({
                 />
               </label>
 
-              <Button disabled={isPending} type="submit">
+              <Button
+                disabled={isPending || (role === "doctor" && !doctorId)}
+                type="submit"
+              >
                 {isPending ? "Working..." : "Create invite"}
               </Button>
             </form>
 
             {createdInvite ? (
-              <div className="mt-5 rounded-3xl border border-border bg-background/70 p-4 text-sm">
+              <div className="mt-5 rounded-2xl border border-border bg-white/75 p-4 text-sm">
                 <p className="font-medium">Latest invite</p>
                 <p className="mt-2 text-muted-foreground">
                   Code: <span className="font-semibold text-foreground">{createdInvite.inviteCode}</span>
@@ -282,7 +346,7 @@ export function InviteManager({
                   </span>
                 </p>
                 {createdInvite.deliveryError ? (
-                  <p className="mt-1 text-sm text-rose-700">
+                  <p className="mt-1 text-sm text-destructive">
                     {createdInvite.deliveryError}
                   </p>
                 ) : null}
@@ -300,7 +364,7 @@ export function InviteManager({
           </CardContent>
         </Card>
 
-        <Card className="bg-card/85">
+        <Card className="qcare-panel-soft">
           <CardHeader>
             <CardTitle>Admin is also doctor</CardTitle>
           </CardHeader>
@@ -309,12 +373,12 @@ export function InviteManager({
               <label className="grid gap-2 text-sm">
                 <span className="font-medium">Link my account to doctor profile</span>
                 <select
-                  className="h-11 rounded-2xl border border-input bg-card px-4"
+                  className="h-11 rounded-xl border border-input bg-white px-3 text-[13px]"
                   value={linkDoctorId}
                   onChange={(event) => setLinkDoctorId(event.target.value)}
                 >
                   <option value="">Select doctor profile</option>
-                  {availableDoctors.map((doctor) => (
+                  {linkableDoctors.map((doctor) => (
                     <option key={doctor.id} value={doctor.id}>
                       {doctor.name}
                     </option>
@@ -324,6 +388,16 @@ export function InviteManager({
               <Button disabled={!linkDoctorId || isPending} type="submit">
                 {isPending ? "Working..." : "Link doctor profile"}
               </Button>
+              {activeLinkedDoctorId ? (
+                <Button
+                  disabled={isPending}
+                  onClick={handleUnlinkDoctor}
+                  type="button"
+                  variant="outline"
+                >
+                  {isPending ? "Working..." : "Unlink my doctor profile"}
+                </Button>
+              ) : null}
             </form>
             <p className="mt-4 text-sm text-muted-foreground">
               Use this when the clinic owner is also the practicing doctor and
@@ -334,12 +408,12 @@ export function InviteManager({
       </div>
 
       {message ? (
-        <Card className="border-accent/40 bg-accent/10">
+        <Card className="border-indigo-200/70 bg-indigo-50/85">
           <CardContent className="pt-6 text-sm">{message}</CardContent>
         </Card>
       ) : null}
 
-      <Card className="bg-card/85">
+      <Card className="qcare-panel-soft">
         <CardHeader>
           <CardTitle>Invite history</CardTitle>
         </CardHeader>
@@ -356,7 +430,7 @@ export function InviteManager({
 
                 return (
                   <div
-                    className="rounded-3xl border border-border/80 bg-background/70 p-4"
+                    className="rounded-2xl border border-border/80 bg-white/75 p-4"
                     key={invite.id}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
@@ -383,21 +457,21 @@ export function InviteManager({
                           </span>
                         </p>
                         {invite.delivery_error ? (
-                          <p className="mt-1 text-sm text-rose-700">
+                          <p className="mt-1 text-sm text-destructive">
                             {invite.delivery_error}
                           </p>
                         ) : null}
                       </div>
                       <div
                         className={cn(
-                          "rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide",
+                          "rounded-md px-2.5 py-1 text-xs font-semibold uppercase tracking-wide",
                           status === "pending" &&
-                            "bg-primary/15 text-primary",
+                            "bg-indigo-100 text-indigo-700",
                           status === "accepted" &&
-                            "bg-emerald-600/15 text-emerald-700",
+                            "bg-emerald-100 text-emerald-700",
                           status !== "pending" &&
                             status !== "accepted" &&
-                            "bg-secondary text-secondary-foreground"
+                            "bg-slate-100 text-slate-600"
                         )}
                       >
                         {status}

@@ -67,8 +67,21 @@ export async function POST(request: Request) {
     }
 
     if (doctor.clerk_user_id) {
+      if (doctor.clerk_user_id === user.clerkUserId) {
+        return NextResponse.json(
+          {
+            error:
+              "That doctor profile is already linked to your account. Open /doctor directly instead of creating a new invite for it."
+          },
+          { status: 409 }
+        );
+      }
+
       return NextResponse.json(
-        { error: "That doctor profile is already linked to a Clerk account." },
+        {
+          error:
+            "That doctor profile is already linked to another Clerk account."
+        },
         { status: 409 }
       );
     }

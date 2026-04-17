@@ -1,9 +1,16 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { NextResponse } from "next/server";
 
+import { isAppRole } from "@/lib/auth/roles";
 import { syncUserRoleMetadata } from "@/lib/auth/current-user";
 import { getInviteDestination } from "@/lib/invites";
+import type { AppRole } from "@/lib/utils/types";
 import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
+
+type ClerkMetadata = {
+  clinic_id?: string;
+  role?: string;
+};
 
 export async function POST(request: Request) {
   const session = await auth();
@@ -24,6 +31,13 @@ export async function POST(request: Request) {
   }
 
   const signedInEmail = user.primaryEmailAddress.emailAddress.toLowerCase();
+  const publicMetadata = user.publicMetadata as ClerkMetadata;
+  const privateMetadata = user.privateMetadata as ClerkMetadata;
+  const currentRoleValue = publicMetadata.role ?? privateMetadata.role;
+  const currentRole: AppRole | null =
+    currentRoleValue && isAppRole(currentRoleValue) ? currentRoleValue : null;
+  const currentClinicId =
+    publicMetadata.clinic_id ?? privateMetadata.clinic_id ?? null;
 
   if (!inviteCode) {
     return NextResponse.json({ error: "Missing invite code." }, { status: 400 });
@@ -49,6 +63,20 @@ export async function POST(request: Request) {
       {
         error:
           "This invite is tied to a different email address. Please sign in with the email that received the invite."
+      },
+      { status: 409 }
+    );
+  }
+
+  if (
+    currentRole === "clinic_admin" &&
+    currentClinicId &&
+    currentClinicId !== existing.clinic_id
+  ) {
+    return NextResponse.json(
+      {
+        error:
+          "This account is already a clinic admin for a different clinic and cannot accept this invite."
       },
       { status: 409 }
     );
@@ -120,24 +148,56 @@ export async function POST(request: Request) {
     invite = consumed;
   }
 
-  await syncUserRoleMetadata({
-    userId: session.userId,
-    clinicId: invite.clinic_id,
-    role: invite.role
-  });
-
   if (invite.role === "doctor" && invite.doctor_id) {
-    await supabase
+    const { data: linkedDoctor, error: doctorLinkError } = await supabase
       .from("doctors")
       .update({ clerk_user_id: session.userId })
       .eq("id", invite.doctor_id)
       .eq("clinic_id", invite.clinic_id)
-      .or(`clerk_user_id.is.null,clerk_user_id.eq.${session.userId}`);
+      .or(`clerk_user_id.is.null,clerk_user_id.eq.${session.userId}`)
+      .select("id")
+      .maybeSingle();
+
+    if (doctorLinkError) {
+      return NextResponse.json(
+        { error: "Could not link your doctor profile. Please try again." },
+        { status: 500 }
+      );
+    }
+
+    if (!linkedDoctor) {
+      return NextResponse.json(
+        {
+          error:
+            "Doctor profile linking failed. Please ask the clinic admin to link your account in admin onboarding."
+        },
+        { status: 409 }
+      );
+    }
+  }
+
+  const roleToPersist: AppRole =
+    currentRole === "clinic_admin" ? "clinic_admin" : invite.role;
+
+  try {
+    await syncUserRoleMetadata({
+      userId: session.userId,
+      clinicId: invite.clinic_id,
+      role: roleToPersist
+    });
+  } catch {
+    return NextResponse.json(
+      {
+        error:
+          "Invite was accepted, but account metadata sync is still pending. Please refresh and try again."
+      },
+      { status: 500 }
+    );
   }
 
   return NextResponse.json({
     ok: true,
-    role: invite.role,
+    role: roleToPersist,
     destination: getInviteDestination(invite.role)
   });
 }

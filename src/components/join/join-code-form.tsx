@@ -24,7 +24,7 @@ export function JoinCodeForm() {
       <label className="grid gap-2 text-sm">
         <span className="font-medium">Invite code</span>
         <input
-          className="h-12 rounded-2xl border border-input bg-card px-4 uppercase tracking-[0.25em]"
+          className="h-12 rounded-2xl border border-input bg-white px-4 uppercase tracking-[0.25em]"
           maxLength={6}
           onChange={(event) => setCode(event.target.value)}
           placeholder="ABC12X"
