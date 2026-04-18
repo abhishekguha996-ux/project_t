@@ -2520,12 +2520,17 @@ function BriefFaceBody({
 }) {
   const opener = buildOpener(token, brief);
   const snippets = buildSnippets(token, brief);
+  const redFlag =
+    token.raw_complaint && RED_FLAG_RE.test(token.raw_complaint)
+      ? token.raw_complaint
+      : null;
 
   return (
     <div className="mt-2 min-h-[120px]">
       {opener ? (
         <p className="text-[12px] font-medium leading-snug text-[#5C667D]">{opener}</p>
       ) : null}
+      {redFlag ? <RedFlagCallout complaint={redFlag} /> : null}
       <ul className="mt-2.5 grid gap-1.5">
         {loading && !brief
           ? [0, 1, 2].map((i) => (
@@ -2894,6 +2899,25 @@ function NextCard({
   );
 }
 
+/**
+ * Red-flag complaint callout — shown at the top of any flipped briefing
+ * when the raw complaint matches a safety keyword. Spells out *what* the
+ * flag is so the receptionist isn't left guessing.
+ */
+function RedFlagCallout({ complaint }: { complaint: string }) {
+  return (
+    <div className="mt-3 rounded-2xl border border-[#FECACA] bg-[#FFF1F2] p-3">
+      <p className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.2em] text-[#B91C1C]">
+        <AlertTriangle className="h-3 w-3" />
+        Red flag
+      </p>
+      <p className="mt-1 text-[12.5px] font-semibold leading-snug text-[#7F1D1D]">
+        “{complaint}”
+      </p>
+    </div>
+  );
+}
+
 function NextBriefBody({
   token,
   brief,
@@ -2907,12 +2931,18 @@ function NextBriefBody({
   const visits = brief?.recentVisits ?? [];
   const insurance = brief?.patient.insurance_provider ?? null;
   const policy = brief?.patient.insurance_policy_number ?? null;
+  const redFlag =
+    token.raw_complaint && RED_FLAG_RE.test(token.raw_complaint)
+      ? token.raw_complaint
+      : null;
 
   return (
     <div className="mt-2">
       {opener ? (
         <p className="text-[12px] font-medium leading-snug text-[#5C667D]">{opener}</p>
       ) : null}
+
+      {redFlag ? <RedFlagCallout complaint={redFlag} /> : null}
 
       {loading && !brief ? (
         <div className="mt-3 space-y-1.5">
