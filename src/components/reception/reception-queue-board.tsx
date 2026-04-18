@@ -82,6 +82,14 @@ function formatCountdown(value: string) {
   return `${minutes}m left`;
 }
 
+async function readJsonSafely<T>(response: Response) {
+  try {
+    return (await response.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
 export function ReceptionQueueBoard({
   doctors,
   actorRole
@@ -161,13 +169,13 @@ export function ReceptionQueueBoard({
       method: "GET",
       cache: "no-store"
     });
-    const payload = (await response.json()) as {
+    const payload = (await readJsonSafely<{
       error?: string;
       queue?: QueueItem[];
       summary?: QueueSummary;
       queuePause?: QueuePause | null;
       now?: string;
-    };
+    }>(response)) ?? {};
 
     if (!response.ok || !payload.queue || !payload.summary) {
       setError(payload.error ?? "Could not load queue board.");
@@ -218,9 +226,9 @@ export function ReceptionQueueBoard({
         doctorId
       })
     });
-    const body = (await response.json()) as { error?: string };
+    const body = await readJsonSafely<{ error?: string }>(response);
     if (!response.ok) {
-      setError(body.error ?? "Could not update queue status.");
+      setError(body?.error ?? "Could not update queue status.");
       setIsWorking(false);
       return false;
     }
@@ -243,9 +251,9 @@ export function ReceptionQueueBoard({
         action: stage
       })
     });
-    const body = (await response.json()) as { error?: string };
+    const body = await readJsonSafely<{ error?: string }>(response);
     if (!response.ok) {
-      setError(body.error ?? "Could not update checkout stage.");
+      setError(body?.error ?? "Could not update checkout stage.");
       setIsWorking(false);
       return;
     }
@@ -275,9 +283,9 @@ export function ReceptionQueueBoard({
         note: pauseNote.trim() || undefined
       })
     });
-    const body = (await response.json()) as { error?: string };
+    const body = await readJsonSafely<{ error?: string }>(response);
     if (!response.ok) {
-      setError(body.error ?? "Could not pause queue.");
+      setError(body?.error ?? "Could not pause queue.");
       setIsWorking(false);
       return;
     }
@@ -304,9 +312,9 @@ export function ReceptionQueueBoard({
         doctorId
       })
     });
-    const body = (await response.json()) as { error?: string };
+    const body = await readJsonSafely<{ error?: string }>(response);
     if (!response.ok) {
-      setError(body.error ?? "Could not resume queue.");
+      setError(body?.error ?? "Could not resume queue.");
       setIsWorking(false);
       return;
     }

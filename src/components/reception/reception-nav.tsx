@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils/cn";
 
 const LINKS = [
+  { href: "/reception/now", label: "Now · Preview" },
   { href: "/reception/board", label: "Queue Board" },
   { href: "/reception/checkin", label: "Quick Add" },
   { href: "/reception/control", label: "Control Center" }

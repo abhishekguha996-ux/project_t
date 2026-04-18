@@ -95,6 +95,30 @@ a {
   @apply text-inherit no-underline;
 }
 
+@keyframes qcareBreathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.84;
+  }
+}
+
+@keyframes qcareCompleteReveal {
+  0% {
+    opacity: 0;
+    transform: scale(1.18);
+  }
+  45% {
+    opacity: 0.92;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
 @layer base {
   h1,
   h2,
@@ -159,5 +183,13 @@ a {
     @apply inline-flex items-center rounded-full px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.14em];
     background: linear-gradient(135deg, #eef2ff 0%, #f8faff 100%);
     color: #4f46e5;
+  }
+
+  .qcare-breathe {
+    animation: qcareBreathe 4s ease-in-out infinite;
+  }
+
+  .qcare-complete-reveal {
+    animation: qcareCompleteReveal 1200ms cubic-bezier(0.22, 1, 0.36, 1) 1;
   }
 }

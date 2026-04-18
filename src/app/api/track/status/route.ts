@@ -58,7 +58,7 @@ export async function GET(request: Request) {
   const token = tokenData as TrackTokenRow;
   const { data: checkoutData, error: checkoutError } = await supabase
     .from("token_checkout")
-    .select("checkout_stage")
+    .select("checkout_stage, updated_at")
     .eq("token_id", token.id)
     .maybeSingle();
 
@@ -116,6 +116,9 @@ export async function GET(request: Request) {
     doctorRoom: token.doctors?.room ?? null,
     checkoutStage: (checkoutData as { checkout_stage?: CheckoutStage | null } | null)
       ?.checkout_stage ?? null,
+    checkoutUpdatedAt: (
+      checkoutData as { updated_at?: string | null } | null
+    )?.updated_at ?? null,
     complaint: token.raw_complaint,
     queue: {
       position,
