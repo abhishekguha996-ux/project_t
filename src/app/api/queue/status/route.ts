@@ -28,8 +28,21 @@ const queueActionSchema = z.object({
   holdNote: z.string().trim().min(1).max(500).optional()
 });
 
+type PatientRel = {
+  name?: string | null;
+  phone?: string | null;
+  age?: number | null;
+  gender?: "male" | "female" | "other" | null;
+  language_preference?: string | null;
+  created_at?: string | null;
+  insurance_provider?: string | null;
+  insurance_policy_number?: string | null;
+};
+
+type SmsStatus = "queued" | "sent" | "delivered" | "failed" | "undelivered";
+
 type QueueTokenRow = QueueTokenRecord & {
-  patients: { name?: string | null; phone?: string | null } | null;
+  patients: PatientRel | null;
   doctors: { name?: string | null; status?: string | null } | null;
   checkout: {
     checkout_stage: string;
@@ -38,13 +51,14 @@ type QueueTokenRow = QueueTokenRecord & {
     lab_status: string;
     closed_at: string | null;
   } | null;
+  sms: {
+    your_turn: SmsStatus | null;
+    checkin_confirm: SmsStatus | null;
+  };
 };
 
 type RawQueueTokenRow = QueueTokenRecord & {
-  patients:
-    | { name?: string | null; phone?: string | null }
-    | Array<{ name?: string | null; phone?: string | null }>
-    | null;
+  patients: PatientRel | PatientRel[] | null;
   doctors:
     | { name?: string | null; status?: string | null }
     | Array<{ name?: string | null; status?: string | null }>
@@ -129,7 +143,7 @@ export async function GET(request: Request) {
   let query = supabase
     .from("tokens")
     .select(
-      "id, token_number, status, urgency, type, checkin_channel, checked_in_at, serving_started_at, raw_complaint, patient_id, doctor_id, completed_at, consult_duration_seconds, created_at, date, clinic_id, hold_until, hold_note, hold_set_by_role, hold_set_by_clerk_id, patients(name, phone), doctors(name, status)"
+      "id, token_number, status, urgency, type, checkin_channel, checked_in_at, serving_started_at, raw_complaint, patient_id, doctor_id, completed_at, consult_duration_seconds, created_at, date, clinic_id, hold_until, hold_note, hold_set_by_role, hold_set_by_clerk_id, vitals_taken_at, proximity_status, patients(name, phone, age, gender, language_preference, created_at, insurance_provider, insurance_policy_number), doctors(name, status)"
     )
     .eq("clinic_id", user.clinicId)
     .eq("date", today)
@@ -178,11 +192,81 @@ export async function GET(request: Request) {
     );
   }
 
-  const queue: QueueTokenRow[] = queueRaw.map((item) => ({
+  // Latest SMS delivery status per token, keyed by message_type we care about.
+  const smsByTokenId = new Map<string, { your_turn: SmsStatus | null; checkin_confirm: SmsStatus | null }>();
+  if (tokenIds.length > 0) {
+    const { data: msgRows } = await supabase
+      .from("message_log")
+      .select("token_id, message_type, delivery_status, created_at")
+      .in("token_id", tokenIds)
+      .in("message_type", ["your_turn", "checkin_confirm"])
+      .order("created_at", { ascending: false });
+
+    ((msgRows as Array<{
+      token_id: string;
+      message_type: string;
+      delivery_status: SmsStatus;
+    }> | null) ?? []).forEach((row) => {
+      const existing = smsByTokenId.get(row.token_id) ?? {
+        your_turn: null,
+        checkin_confirm: null
+      };
+      if (row.message_type === "your_turn" && !existing.your_turn) {
+        existing.your_turn = row.delivery_status;
+      } else if (row.message_type === "checkin_confirm" && !existing.checkin_confirm) {
+        existing.checkin_confirm = row.delivery_status;
+      }
+      smsByTokenId.set(row.token_id, existing);
+    });
+  }
+
+  // Event-log-driven signals we need per token:
+  //  - heldFromState: was a held patient in 'serving' or 'waiting' when held?
+  //  - seenByDoctor:  has this token ever been in 'serving' today?
+  const heldTokenIds = queueRaw
+    .filter((item) => item.status === "stepped_out")
+    .map((item) => item.id);
+  const heldFromState = new Map<string, string>();
+  const seenByDoctor = new Set<string>();
+
+  if (tokenIds.length > 0) {
+    const { data: eventRows } = await supabase
+      .from("token_event_log")
+      .select("token_id, action, from_state, created_at")
+      .in("token_id", tokenIds)
+      .order("created_at", { ascending: false });
+
+    ((eventRows as Array<{
+      token_id: string;
+      action: string;
+      from_state: string | null;
+      created_at: string;
+    }> | null) ?? []).forEach((row) => {
+      if (row.action === "start_consultation") {
+        seenByDoctor.add(row.token_id);
+      }
+      if (
+        row.action === "hold_slot" &&
+        heldTokenIds.includes(row.token_id) &&
+        !heldFromState.has(row.token_id) &&
+        row.from_state
+      ) {
+        heldFromState.set(row.token_id, row.from_state);
+      }
+    });
+  }
+
+  const queue = queueRaw.map((item) => ({
     ...item,
     patients: unwrapRelation(item.patients),
     doctors: unwrapRelation(item.doctors),
-    checkout: checkoutByTokenId.get(item.id) ?? null
+    checkout: checkoutByTokenId.get(item.id) ?? null,
+    sms: smsByTokenId.get(item.id) ?? { your_turn: null, checkin_confirm: null },
+    held_from_state:
+      item.status === "stepped_out"
+        ? heldFromState.get(item.id) ?? null
+        : null,
+    seen_by_doctor: seenByDoctor.has(item.id)
   }));
   const summary = queue.reduce(
     (accumulator, item) => {
@@ -215,6 +299,31 @@ export async function GET(request: Request) {
     });
   }
 
+  // All active pauses across the clinic's doctors — used by the doctor switcher
+  // to badge paused doctors without requiring a separate round-trip per doctor.
+  const { data: clinicPauseRows } = await supabase
+    .from("doctor_queue_pauses")
+    .select("doctor_id, reason, ends_at, note")
+    .eq("clinic_id", user.clinicId)
+    .eq("is_active", true);
+
+  const clinicPauses: Record<
+    string,
+    { reason: string; ends_at: string; note: string | null }
+  > = {};
+  ((clinicPauseRows as Array<{
+    doctor_id: string;
+    reason: string;
+    ends_at: string;
+    note: string | null;
+  }> | null) ?? []).forEach((row) => {
+    clinicPauses[row.doctor_id] = {
+      reason: row.reason,
+      ends_at: row.ends_at,
+      note: row.note
+    };
+  });
+
   return NextResponse.json({
     ok: true,
     clinicId: user.clinicId,
@@ -226,6 +335,7 @@ export async function GET(request: Request) {
     nextWaiting,
     queuePaused: Boolean(activePause),
     queuePause: activePause,
+    clinicPauses,
     now: new Date().toISOString()
   });
 }

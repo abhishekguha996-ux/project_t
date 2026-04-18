@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Activity, ShieldCheck, Waves } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -10,6 +9,10 @@ import {
   CardTitle
 } from "@/components/ui/card";
 import { getServerEnv } from "@/lib/env/server";
+
+const KICKER = "text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]";
+const SECTION_HEADING =
+  "text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]";
 
 const pillars = [
   {
@@ -42,44 +45,55 @@ export default function HomePage() {
       <section className="grid gap-6 lg:grid-cols-[1.35fr_0.9fr]">
         <Card className="qcare-hero">
           <CardHeader className="space-y-4">
-            <p className="qcare-kicker text-[11px]">
-              QCare / Phase 1
-            </p>
-            <CardTitle className="max-w-2xl text-4xl leading-tight sm:text-5xl">
+            <p className={KICKER}>QCare · Phase 1</p>
+            <CardTitle className="max-w-2xl text-4xl font-extrabold leading-[1.05] tracking-[-0.04em] text-[#0B1840] sm:text-5xl">
               Foundation for a clinic-first queue platform that can replace the paper register.
             </CardTitle>
-            <CardDescription className="max-w-2xl text-base text-muted-foreground">
+            <CardDescription className="max-w-2xl text-base font-medium text-[#5C667D]">
               This workspace is intentionally narrow: infrastructure, schema,
               auth, shared types, and observability. The patient and staff
               experiences build on top of this in the next phases.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap gap-3">
-            <Button asChild variant="outline">
-              <Link href="/reception">Open Reception Placeholder</Link>
-            </Button>
-            <Button asChild>
-              <Link href="/doctor">Open Doctor Placeholder</Link>
-            </Button>
-            <Button asChild variant="outline">
-              <Link href="/admin">Open Admin Onboarding</Link>
-            </Button>
-            <Button asChild variant="outline">
-              <Link href={`/checkin/${defaultCheckinClinicId}` as never}>
-                Open QR Check-in
-              </Link>
-            </Button>
+            <Link
+              className="inline-flex h-11 items-center justify-center rounded-full bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_55%,#4338CA_100%)] px-5 text-[13px] font-bold tracking-[0.01em] text-white shadow-[0_14px_28px_-14px_rgba(79,70,229,0.7)] transition hover:-translate-y-[1px] hover:brightness-105"
+              href="/reception"
+            >
+              Open Reception Cockpit
+            </Link>
+            <Link
+              className="inline-flex h-11 items-center justify-center rounded-full border border-[#C7D2FE] bg-[linear-gradient(135deg,#F5F7FF_0%,#EEF2FF_100%)] px-5 text-[13px] font-bold tracking-[0.01em] text-[#1E3A8A] shadow-[0_10px_22px_-16px_rgba(79,70,229,0.45)] transition hover:-translate-y-[1px] hover:border-[#A5B4FC] hover:bg-[#EEF2FF]"
+              href="/doctor"
+            >
+              Open Doctor Placeholder
+            </Link>
+            <Link
+              className="inline-flex h-11 items-center justify-center rounded-full border border-[#C7D2FE] bg-[linear-gradient(135deg,#F5F7FF_0%,#EEF2FF_100%)] px-5 text-[13px] font-bold tracking-[0.01em] text-[#1E3A8A] shadow-[0_10px_22px_-16px_rgba(79,70,229,0.45)] transition hover:-translate-y-[1px] hover:border-[#A5B4FC] hover:bg-[#EEF2FF]"
+              href="/admin"
+            >
+              Open Admin Onboarding
+            </Link>
+            <Link
+              className="inline-flex h-11 items-center justify-center rounded-full border border-[#C7D2FE] bg-[linear-gradient(135deg,#F5F7FF_0%,#EEF2FF_100%)] px-5 text-[13px] font-bold tracking-[0.01em] text-[#1E3A8A] shadow-[0_10px_22px_-16px_rgba(79,70,229,0.45)] transition hover:-translate-y-[1px] hover:border-[#A5B4FC] hover:bg-[#EEF2FF]"
+              href={`/checkin/${defaultCheckinClinicId}` as never}
+            >
+              Open QR Check-in
+            </Link>
           </CardContent>
         </Card>
 
         <Card className="qcare-panel-soft">
           <CardHeader>
-            <CardTitle>Phase 1 checklist</CardTitle>
-            <CardDescription>
+            <p className={SECTION_HEADING}>Checklist</p>
+            <CardTitle className="mt-1.5 text-2xl font-extrabold tracking-[-0.03em] text-[#0B1840]">
+              Phase 1 scope
+            </CardTitle>
+            <CardDescription className="text-[#5C667D]">
               What this repo now owns before any feature-specific UI begins.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3 text-sm text-muted-foreground">
+          <CardContent className="space-y-2.5 text-sm font-medium text-[#5C667D]">
             <p>1. App shell and workspace conventions</p>
             <p>2. Supabase schema, RLS, cron, and seed data</p>
             <p>3. Clerk role contract and protected route scaffolding</p>
@@ -97,11 +111,15 @@ export default function HomePage() {
           return (
             <Card key={pillar.title} className="qcare-panel-soft">
               <CardHeader className="space-y-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#eef2ff_0%,#f8faff_100%)] text-primary">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[linear-gradient(135deg,#eef2ff_0%,#f8faff_100%)] text-[#4F46E5] shadow-[0_10px_22px_-16px_rgba(79,70,229,0.45)]">
                   <Icon className="h-5 w-5" />
                 </div>
-                <CardTitle>{pillar.title}</CardTitle>
-                <CardDescription>{pillar.description}</CardDescription>
+                <CardTitle className="text-lg font-extrabold tracking-[-0.02em] text-[#0B1840]">
+                  {pillar.title}
+                </CardTitle>
+                <CardDescription className="text-[13px] font-medium leading-relaxed text-[#5C667D]">
+                  {pillar.description}
+                </CardDescription>
               </CardHeader>
             </Card>
           );
