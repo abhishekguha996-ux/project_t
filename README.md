@@ -1,6 +1,6 @@
 # QCare Phase 1 Foundation
 
-This repository contains the Phase 1 foundation for QCare inside [`project_t`](./). The goal is to establish the app shell, shared schema, auth contract, seed data, and observability baseline before building patient check-in or clinic dashboards.
+This repository contains the Phase 1 foundation for QCare inside [`project_t`](./). The goal is to establish the app shell, shared schema, auth contract, seed data, and observability baseline before building patient check-in or clinic dashboards. TEST
 
 ## Included in this phase
 
