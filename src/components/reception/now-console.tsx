@@ -1,12 +1,13 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
   MessageSquare,
   PauseCircle,
   Phone,
@@ -84,6 +85,8 @@ type QueuePause = { id: string; reason: string; ends_at: string; note: string | 
 type NeedsYouItem = {
   id: string;
   severity: "red" | "amber" | "info";
+  /** Priority score (higher = shown earlier). Queue-pause is pinned at 100. */
+  priority: number;
   title: string;
   detail: string;
   primary?: { label: string; run: () => Promise<void> | void };
@@ -134,6 +137,36 @@ function minutesUntil(iso: string | null | undefined) {
 }
 function formatClock(date: Date) {
   return new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+/**
+ * Returns a single display token for a patient — honorific-aware first name,
+ * so "Mr. Reyansh Gupta" becomes "Reyansh" and long full names never crowd a
+ * compact card. Mirrors the logic on the patient tracking and intake screens
+ * so the name a patient sees on their SMS matches what reception sees.
+ */
+const HONORIFICS = new Set([
+  "mr",
+  "mrs",
+  "ms",
+  "miss",
+  "dr",
+  "doctor",
+  "prof",
+  "sir",
+  "shri",
+  "smt"
+]);
+function formatPatientName(name: string | null | undefined): string {
+  const normalized = (name ?? "").trim();
+  if (!normalized) return "Patient";
+  const parts = normalized.replace(/\s+/g, " ").split(" ").filter(Boolean);
+  if (parts.length === 0) return "Patient";
+  const honorific = parts[0]?.replace(/\./g, "").toLowerCase();
+  if (HONORIFICS.has(honorific) && parts.length > 1) {
+    return parts[1] ?? "Patient";
+  }
+  return parts[0] ?? "Patient";
 }
 
 /** Minutes to a human-friendly duration.  <60m → "Xm"; ≥60m → "Xh Ym" or "Xh". */
@@ -293,6 +326,10 @@ export function NowConsole({
   const [copilot, setCopilot] = useState("");
   const [journeysOpen, setJourneysOpen] = useState(false);
   const [holdTarget, setHoldTarget] = useState<QueueItem | null>(null);
+  const [paymentTarget, setPaymentTarget] = useState<QueueItem | null>(null);
+  const [vitalsTarget, setVitalsTarget] = useState<QueueItem | null>(null);
+  const [proximityTarget, setProximityTarget] = useState<QueueItem | null>(null);
+  const [insuranceTarget, setInsuranceTarget] = useState<QueueItem | null>(null);
   const [pauseOpen, setPauseOpen] = useState(false);
   const [laneView, setLaneView] = useState<TokenStatus | null>(null);
   const [patientDetail, setPatientDetail] = useState<PatientHit | null>(null);
@@ -344,6 +381,30 @@ export function NowConsole({
       window.removeEventListener("qcare:queue-refresh", onDemand);
     };
   }, [refresh]);
+
+  // Warm mutation routes so Next.js dev-mode route compilation doesn't add
+  // 2-5 s to the first Pause/Hold/Action click. Each route Zod-validates the
+  // body and returns 400 instantly when we send `{}`; the Important Thing is
+  // that compiling the route+dependency graph is done before the receptionist
+  // actually clicks anything. No-op in production (routes are pre-compiled).
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    const warmPaths = [
+      "/api/queue/pause",
+      "/api/queue/action",
+      "/api/checkout/action"
+    ];
+    warmPaths.forEach((p) => {
+      void fetch(p, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        cache: "no-store"
+      }).catch(() => {
+        /* compile-only ping; ignore response */
+      });
+    });
+  }, []);
 
   useEffect(() => {
     const i = window.setInterval(() => setClock(new Date()), 30_000);
@@ -398,11 +459,12 @@ export function NowConsole({
     //   4. SMS-delivery failures for QR patients
     //   5. Routine holds — expired first, then active
 
-    // 1 · Queue paused
+    // 1 · Queue paused — pinned at priority 100 so it's always the top card.
     if (activePause) {
       items.push({
         id: `pause-${activePause.id}`,
         severity: "amber",
+        priority: 100,
         title: `Queue paused for ${doctorName}`,
         detail: `Ends ${formatClock(new Date(activePause.ends_at))}${
           activePause.note ? ` · ${activePause.note}` : ""
@@ -426,9 +488,13 @@ export function NowConsole({
       const mins = minutesUntil(t.hold_until);
       const expired = mins <= 0;
       const name = t.patients?.name ?? "Patient";
+      // LLM-ish weighting: expired holds beat active holds; shorter remaining
+      // time is more urgent. Caps below queue-pause, above red flags.
+      const score = expired ? 88 : 82 - Math.min(12, Math.floor(mins / 5));
       items.push({
         id: `held-${t.id}`,
         severity: "amber",
+        priority: score,
         title: `Held mid-consult — #${t.token_number} ${name}`,
         detail: expired
           ? `Hold expired${t.hold_note ? ` · ${t.hold_note}` : ""}`
@@ -452,9 +518,15 @@ export function NowConsole({
       if (t.seen_by_doctor) return;
       const c = t.raw_complaint ?? "";
       if (c && RED_FLAG_RE.test(c)) {
+        // Red flags weight by how long the patient has been waiting — someone
+        // with chest pain who's been there 25 min is higher priority than a
+        // fresh check-in.
+        const waited = minutesSince(t.checked_in_at);
+        const score = 70 + Math.min(15, Math.floor(waited / 5));
         items.push({
           id: `red-${t.id}`,
           severity: "red",
+          priority: score,
           title: `Possible red flag — #${t.token_number} ${t.patients?.name ?? "Patient"}`,
           detail: `"${c.slice(0, 100)}" — move ahead of queue?`,
           primary: {
@@ -473,6 +545,7 @@ export function NowConsole({
         items.push({
           id: `sms-failed-${t.id}`,
           severity: "amber",
+          priority: 55,
           title: `SMS failed — #${t.token_number} ${t.patients?.name ?? "Patient"}`,
           detail: `QR patient; check-in confirmation didn't deliver. Call ${
             t.patients?.phone ?? "them"
@@ -502,6 +575,7 @@ export function NowConsole({
       items.push({
         id: `held-${t.id}`,
         severity: "amber",
+        priority: 48,
         title: `Hold expired — #${t.token_number} ${name}`,
         detail: t.hold_note ? `Note: ${t.hold_note}` : "Hold window ended.",
         primary: { label: "Skip", run: () => runAction("skip", t.id) },
@@ -518,6 +592,7 @@ export function NowConsole({
       items.push({
         id: `held-${t.id}`,
         severity: "info",
+        priority: 20,
         title: `On hold — #${t.token_number} ${name}`,
         detail: `${formatDur(mins)} left${t.hold_note ? ` · ${t.hold_note}` : ""}`,
         primary: {
@@ -528,8 +603,16 @@ export function NowConsole({
       });
     });
 
-    return items.filter((i) => !dismissed.has(i.id));
+    return items
+      .filter((i) => !dismissed.has(i.id))
+      .sort((a, b) => b.priority - a.priority);
   }, [queue, heldList, activePause, dismissed, doctorName]);
+
+  // Top 3 go to the Action Center card; the rest spill into the Actions
+  // metric pill and the overflow modal behind it.
+  const ACTION_CENTER_MAX = 3;
+  const needsYouTop = needsYou.slice(0, ACTION_CENTER_MAX);
+  const needsYouOverflow = needsYou.slice(ACTION_CENTER_MAX);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -707,7 +790,7 @@ export function NowConsole({
   }
 
   return (
-    <section className="relative flex h-[100dvh] flex-col overflow-hidden bg-[#FBFBFD] px-5 pb-8 pt-5 sm:px-8">
+    <section className="relative flex h-[100dvh] flex-col overflow-hidden bg-[#FBFBFD] px-5 pb-3 pt-5 sm:px-8 sm:pb-4">
       <div className="pointer-events-none absolute right-[-20%] top-[-24%] -z-0 h-[860px] w-[860px] rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.14)_0%,rgba(255,255,255,0.98)_70%)]" />
       <div className="pointer-events-none absolute left-[-14%] bottom-[-10%] -z-0 h-[720px] w-[720px] rounded-full bg-[radial-gradient(circle,rgba(16,185,129,0.08)_0%,rgba(255,255,255,0)_70%)]" />
 
@@ -855,23 +938,16 @@ export function NowConsole({
 
         <div className="grid min-h-0 flex-1 auto-rows-fr gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)]">
           <WithDoctorCard
-            token={currentServing}
+            clinicName={clinic?.name ?? "the clinic"}
             isWorking={isWorking}
+            onCollectPayment={(t) => setPaymentTarget(t)}
             onDone={(id) => runAction("mark_consultation_done", id)}
             onHold={() => currentServing && setHoldTarget(currentServing)}
+            onOpenInsurance={(t) => setInsuranceTarget(t)}
+            onOpenProximity={(t) => setProximityTarget(t)}
+            onOpenVitals={(t) => setVitalsTarget(t)}
             onSkip={(id) => runAction("skip", id)}
-            onOpenProfile={(pid) => {
-              // open via the same path as co-pilot search — search by phone & open detail
-              void (async () => {
-                const res = await fetch(
-                  `/api/patients/search?q=${encodeURIComponent(currentServing?.patients?.phone ?? "")}`,
-                  { cache: "no-store" }
-                );
-                const body = await readJson<{ results?: PatientHit[] }>(res);
-                const hit = (body?.results ?? []).find((r) => r.id === pid);
-                if (hit) setPatientDetail(hit);
-              })();
-            }}
+            token={currentServing}
           />
           <NextCard
             token={nextWaiting}
@@ -879,6 +955,10 @@ export function NowConsole({
             upcoming={upcomingAfterNext}
             isWorking={isWorking || Boolean(currentServing)}
             behind={Math.max(0, waitingList.length - 1)}
+            onCollectPayment={(t) => setPaymentTarget(t)}
+            onOpenInsurance={(t) => setInsuranceTarget(t)}
+            onOpenProximity={(t) => setProximityTarget(t)}
+            onOpenVitals={(t) => setVitalsTarget(t)}
             onStart={(id) => runAction("start_consultation", id)}
             onOpenProfile={(pid) => {
               void (async () => {
@@ -893,15 +973,15 @@ export function NowConsole({
             }}
           />
           <NeedsYouCard
-            items={needsYou}
             isWorking={isWorking}
+            items={needsYouTop}
             onDismiss={(id) => setDismissed((d) => new Set(d).add(id))}
+            overflowItems={needsYouOverflow}
           />
         </div>
 
-        {/* Co-pilot is the natural bottom of the page — not floating */}
-        <div className="mt-6">
-          <CoPilotBar
+        <div className="mt-4 shrink-0">
+          <PranaBar
             inputRef={copilotRef}
             value={copilot}
             onChange={setCopilot}
@@ -922,10 +1002,6 @@ export function NowConsole({
             }}
           />
         </div>
-
-        <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.18em] text-[#95A0B5]">
-          Signed in as {userLabel} · role {actorRole} · Last sync {formatClock(lastPulse)}
-        </p>
       </div>
 
       {/* Popovers rendered via portal so they escape overflow:hidden */}
@@ -1037,6 +1113,41 @@ export function NowConsole({
         />
       ) : null}
 
+      {paymentTarget ? (
+        <PaymentDialog
+          token={paymentTarget}
+          onClose={() => setPaymentTarget(null)}
+        />
+      ) : null}
+
+      {vitalsTarget ? (
+        <VitalsDialog
+          token={vitalsTarget}
+          onClose={() => setVitalsTarget(null)}
+        />
+      ) : null}
+
+      {proximityTarget ? (
+        <ProximityDialog
+          clinicName={clinic?.name ?? "the clinic"}
+          token={proximityTarget}
+          onClose={() => setProximityTarget(null)}
+        />
+      ) : null}
+
+      {insuranceTarget ? (
+        <InsuranceDialog
+          token={insuranceTarget}
+          onClose={() => setInsuranceTarget(null)}
+          onCollectCopay={() => {
+            const t = insuranceTarget;
+            setInsuranceTarget(null);
+            setPaymentTarget(t);
+          }}
+        />
+      ) : null}
+
+
       {pauseOpen ? (
         <PauseDialog
           doctorName={doctorName}
@@ -1142,7 +1253,299 @@ function looksLikeQuestion(q: string): boolean {
   );
 }
 
-function CoPilotBar({
+type PranaAmberMarkProps = {
+  activationKey?: number;
+  thinking?: boolean;
+  ripple?: boolean;
+  boxSize?: number;
+  glyphSize?: number;
+  className?: string;
+};
+
+function PranaAmberMark({
+  activationKey = 0,
+  thinking = false,
+  ripple = false,
+  boxSize = 48,
+  glyphSize = 20,
+  className
+}: PranaAmberMarkProps) {
+  const gradientId = useId().replace(/:/g, "");
+  // Legacy sun-wheel spokes — retained below for reference only; the static
+  // symbol now uses the Padma-Bindu (lotus+bindu), defined further down.
+  const spokes = [
+    { angle: 0, y: -10.1, length: 5.1, width: 1.9, opacity: 0.94 },
+    { angle: 43, y: -9.6, length: 4.4, width: 1.8, opacity: 0.86 },
+    { angle: 89, y: -10.4, length: 5.4, width: 1.85, opacity: 0.98 },
+    { angle: 133, y: -9.3, length: 4.2, width: 1.72, opacity: 0.83 },
+    { angle: 180, y: -9.9, length: 4.8, width: 1.9, opacity: 0.92 },
+    { angle: 224, y: -9.2, length: 4.3, width: 1.76, opacity: 0.81 },
+    { angle: 271, y: -10.2, length: 5.2, width: 1.84, opacity: 0.96 },
+    { angle: 316, y: -9.4, length: 4.5, width: 1.78, opacity: 0.85 }
+  ] as const;
+
+  return (
+    <span
+      aria-hidden
+      className={cn("relative inline-flex items-center justify-center", className)}
+      style={{ width: boxSize, height: boxSize }}
+    >
+      {/* Outer ambient halo — breathing, extends beyond the box so the orb
+          feels like a presence, not a clipped icon. */}
+      <span
+        className="qcare-prana-idle absolute inset-[-6%] rounded-full"
+        style={{
+          background:
+            "radial-gradient(circle, rgba(251,191,36,0.28) 0%, rgba(245,158,11,0.18) 30%, rgba(217,119,6,0.08) 52%, rgba(120,53,15,0.02) 72%, transparent 86%)"
+        }}
+      />
+
+      {thinking ? (
+        <span
+          className="qcare-prana-thinking-halo absolute inset-[-18%] rounded-full"
+          style={{
+            background:
+              "radial-gradient(circle, rgba(251,191,36,0.28) 0%, rgba(245,158,11,0.17) 40%, rgba(217,119,6,0.06) 62%, transparent 78%)"
+          }}
+        />
+      ) : null}
+
+      {ripple && activationKey > 0 ? (
+        <span
+          className="qcare-prana-ripple absolute inset-[6%] rounded-full border border-[#FBBF24]/65"
+          key={`prana-ripple-${activationKey}`}
+        />
+      ) : null}
+
+      {/* Glass amber sphere — the orb body. Translucent, like amber resin or
+          honey suspended in glass. Every opacity is kept well below 0.5 so
+          the background of the page (cards, panels) bleeds through, tying the
+          orb into the room rather than sitting on top of it. */}
+      <span
+        className={cn(
+          "absolute inset-[8%] rounded-full",
+          activationKey > 0 && "qcare-prana-sphere-lift"
+        )}
+        key={`prana-sphere-${activationKey || "rest"}`}
+        style={{
+          background:
+            "radial-gradient(circle at 30% 24%, rgba(255,245,210,0.46) 0%, rgba(253,230,138,0.3) 24%, rgba(251,191,36,0.2) 52%, rgba(217,119,6,0.15) 80%, rgba(180,83,9,0.18) 100%)",
+          boxShadow:
+            "inset 0 2px 6px rgba(255,251,235,0.65), inset 0 -5px 14px rgba(146,64,14,0.18), 0 0 24px rgba(245,158,11,0.4), 0 0 52px rgba(245,158,11,0.2)"
+        }}
+      />
+
+      {/* Warm interior glow — a very gentle amber wash at the heart of the
+          sphere. Replaces the old opaque dark ember so the orb is luminous
+          all the way through, not pierced by a black dot. */}
+      <span
+        aria-hidden
+        className="absolute inset-[28%] rounded-full"
+        style={{
+          background:
+            "radial-gradient(circle at 42% 38%, rgba(253,230,138,0.32) 0%, rgba(251,191,36,0.18) 55%, rgba(217,119,6,0.08) 100%)"
+        }}
+      />
+
+      <span
+        className={cn(
+          "relative flex items-center justify-center",
+          activationKey > 0 && "qcare-prana-ignite"
+        )}
+        key={`prana-activate-${activationKey || "rest"}`}
+        style={{ width: glyphSize, height: glyphSize }}
+      >
+        <span
+          className={cn("relative flex items-center justify-center", thinking && "qcare-prana-thinking")}
+          style={{ width: glyphSize, height: glyphSize }}
+        >
+          {/* Padma-Bindu — five lotus petals radiating from a luminous central
+              Bindu. Five for the Pancha-Prāṇa (Prāna, Apāna, Vyāna, Udāna,
+              Samāna). The Bindu is the seed of consciousness that animates all
+              five. Translucent amber gradient so it reads like a jewel, not a
+              logo. */}
+          <svg
+            fill="none"
+            height={glyphSize}
+            viewBox="0 0 24 24"
+            width={glyphSize}
+          >
+            <defs>
+              <linearGradient
+                id={`${gradientId}-petal`}
+                x1="12"
+                x2="12"
+                y1="2"
+                y2="12"
+              >
+                <stop offset="0%" stopColor="#FFF4E5" stopOpacity="0.95" />
+                <stop offset="40%" stopColor="#FBBF24" stopOpacity="0.85" />
+                <stop offset="100%" stopColor="#D97706" stopOpacity="0.6" />
+              </linearGradient>
+              <radialGradient
+                id={`${gradientId}-bindu`}
+                cx="0.5"
+                cy="0.5"
+                r="0.5"
+              >
+                <stop offset="0%" stopColor="#FFF4E5" stopOpacity="1" />
+                <stop offset="45%" stopColor="#FCD34D" stopOpacity="0.98" />
+                <stop offset="100%" stopColor="#D97706" stopOpacity="0.85" />
+              </radialGradient>
+            </defs>
+            <g transform="translate(12 12)">
+              {/* Five petals at 72° intervals — pancha-prāṇa */}
+              {[0, 72, 144, 216, 288].map((angle) => (
+                <g key={angle} transform={`rotate(${angle})`}>
+                  {/* Petal body — translucent amber almond */}
+                  <path
+                    d="M 0 -2.6 C 1.7 -3.7 2.4 -6.8 0 -10 C -2.4 -6.8 -1.7 -3.7 0 -2.6 Z"
+                    fill={`url(#${gradientId}-petal)`}
+                  />
+                  {/* Light edge on one side — the glint that makes it read
+                      as a 3D petal, not a flat shape */}
+                  <path
+                    d="M 0 -2.6 C 1.7 -3.7 2.4 -6.8 0 -10"
+                    fill="none"
+                    stroke="#FEF3C7"
+                    strokeOpacity="0.55"
+                    strokeWidth="0.35"
+                  />
+                </g>
+              ))}
+              {/* Subtle inner ring — faintest contour around the bindu */}
+              <circle
+                cx="0"
+                cy="0"
+                fill="none"
+                r="2.8"
+                stroke="#FEF3C7"
+                strokeOpacity="0.22"
+                strokeWidth="0.35"
+              />
+              {/* The Bindu — seed of consciousness, the one luminous dot */}
+              <circle cx="0" cy="0" fill={`url(#${gradientId}-bindu)`} r="1.9" />
+              {/* Inner hottest point */}
+              <circle cx="-0.35" cy="-0.35" fill="#FFFBEB" opacity="0.9" r="0.6" />
+            </g>
+          </svg>
+        </span>
+      </span>
+    </span>
+  );
+}
+
+/* ============================================================
+   Activation waveform — a luminous amber ECG pulse that draws
+   across the dark bar when Prāṇa is summoned. Mimics the hero
+   visualization from the reference: a quiet baseline, a sharp
+   twin peak at the heart of the filament, trails dissolving to
+   the left and right. Three stacked strokes (wide/soft glow →
+   mid glow → crisp line) give it that volumetric "light in a
+   vacuum" quality.
+   ============================================================ */
+function PranaActivationWave() {
+  // ECG-style pulse path: long baseline approaching the peak, two sharp
+  // inflections (rise + dip), then baseline trailing out. Drawn on a
+  // non-uniformly scaled viewBox so it fills any bar width.
+  const path =
+    "M 0 50 L 200 50 C 215 50 222 50 230 30 C 236 14 242 14 248 50 C 254 86 260 86 266 50 C 272 40 278 50 286 50 L 600 50";
+  return (
+    <svg
+      aria-hidden
+      className="pointer-events-none absolute inset-0 h-full w-full"
+      preserveAspectRatio="none"
+      viewBox="0 0 600 100"
+    >
+      <defs>
+        <linearGradient
+          id="prana-wave-gradient"
+          x1="0"
+          x2="1"
+          y1="0"
+          y2="0"
+        >
+          <stop offset="0%" stopColor="#D97706" stopOpacity="0" />
+          <stop offset="18%" stopColor="#F59E0B" stopOpacity="0.55" />
+          <stop offset="35%" stopColor="#FBBF24" stopOpacity="0.95" />
+          <stop offset="50%" stopColor="#F59E0B" stopOpacity="1" />
+          <stop offset="65%" stopColor="#FBBF24" stopOpacity="0.95" />
+          <stop offset="82%" stopColor="#F59E0B" stopOpacity="0.55" />
+          <stop offset="100%" stopColor="#D97706" stopOpacity="0" />
+        </linearGradient>
+        <filter
+          height="200%"
+          id="prana-wave-softglow"
+          width="140%"
+          x="-20%"
+          y="-50%"
+        >
+          <feGaussianBlur stdDeviation="6" />
+        </filter>
+        <filter
+          height="200%"
+          id="prana-wave-midglow"
+          width="140%"
+          x="-20%"
+          y="-50%"
+        >
+          <feGaussianBlur stdDeviation="2" />
+        </filter>
+      </defs>
+      {/* Outer halo pass — soft blurred bloom */}
+      <path
+        className="qcare-prana-wave-draw"
+        d={path}
+        fill="none"
+        filter="url(#prana-wave-softglow)"
+        opacity="0.6"
+        pathLength="1"
+        stroke="url(#prana-wave-gradient)"
+        strokeDasharray="1"
+        strokeDashoffset="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="5"
+      />
+      {/* Medium pass — glowing body */}
+      <path
+        className="qcare-prana-wave-draw"
+        d={path}
+        fill="none"
+        filter="url(#prana-wave-midglow)"
+        pathLength="1"
+        stroke="url(#prana-wave-gradient)"
+        strokeDasharray="1"
+        strokeDashoffset="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2.5"
+      />
+      {/* Crisp filament line on top */}
+      <path
+        className="qcare-prana-wave-draw"
+        d={path}
+        fill="none"
+        pathLength="1"
+        stroke="url(#prana-wave-gradient)"
+        strokeDasharray="1"
+        strokeDashoffset="1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.25"
+      />
+    </svg>
+  );
+}
+
+/* ============================================================
+   OPTION B — PranaBar: ambient horizontal bar.
+   A horizontal presence at the bottom of the page. Soft, glassy,
+   borderless input. A small breathing mini-orb stands in for the
+   old "Co-pilot" chip, so Prāṇa reads as *a voice waiting to speak*
+   rather than a labelled feature.
+   ============================================================ */
+function PranaBar({
   inputRef,
   value,
   onChange,
@@ -1159,36 +1562,31 @@ function CoPilotBar({
   onPickPatient: (hit: PatientHit) => void;
   onAnswerAction: (action: { label: string; href?: string; kind: "link" | "call" | "checkin" }) => void;
 }) {
-  const [openResults, setOpenResults] = useState(false);
+  const [focused, setFocused] = useState(false);
   const [answer, setAnswer] = useState<CoPilotAnswer | null>(null);
   const [asking, setAsking] = useState(false);
+  const [wakeKey, setWakeKey] = useState(0);
   const { results, loading } = usePatientSearch(value);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
+  // Every time the user summons Prāṇa (focused false → true), re-key the
+  // wake animation so the orb "inhales" visibly — swell, bloom, settle.
   useEffect(() => {
-    if (value.trim().length === 0) {
-      setOpenResults(false);
-      setAnswer(null);
-      return;
-    }
-    if (!looksLikeQuestion(value)) {
-      setOpenResults(value.trim().length >= 2);
-    } else {
-      setOpenResults(false);
-    }
-  }, [value]);
+    if (focused) setWakeKey((k) => k + 1);
+  }, [focused]);
 
+  // Click outside collapses the surface
   useEffect(() => {
     function onClick(e: MouseEvent) {
       if (!wrapperRef.current) return;
       if (!wrapperRef.current.contains(e.target as Node)) {
-        setOpenResults(false);
+        setFocused(false);
         setAnswer(null);
       }
     }
-    if (openResults || answer) document.addEventListener("mousedown", onClick);
+    document.addEventListener("mousedown", onClick);
     return () => document.removeEventListener("mousedown", onClick);
-  }, [openResults, answer]);
+  }, []);
 
   async function askQuestion(q: string) {
     setAsking(true);
@@ -1201,165 +1599,362 @@ function CoPilotBar({
     setAsking(false);
     setAnswer(
       body ?? {
-        answer: "Sorry — something went wrong asking the co-pilot.",
+        answer: "Sorry — Prāṇa couldn't answer that right now.",
         patient: null,
         actions: []
       }
     );
   }
 
+  const trimmed = value.trim();
+  const isQuestion = looksLikeQuestion(trimmed);
+  const showResults = trimmed.length >= 2 && !isQuestion && !answer && !asking;
+  const showSuggestions = focused && trimmed.length === 0 && !answer && !asking;
+  const showSurface = focused || answer || asking;
+
+  function submit() {
+    const q = value.trim();
+    if (!q) return;
+    if (looksLikeQuestion(q)) {
+      void askQuestion(q);
+      return;
+    }
+    const phone = q.replace(/[^\d+]/g, "");
+    if (phone.length >= 7) onSubmitPhone(phone);
+    else if (/^(new|add|walk)/i.test(q)) onSubmitNewPatient();
+    else if (results.length === 1) onPickPatient(results[0]);
+  }
+
+  const SUGGESTIONS: Array<{ label: string; q: string }> = [
+    { label: "Any red flags right now?", q: "Any red flags right now?" },
+    { label: "Who has been waiting longest?", q: "Who has been waiting the longest?" },
+    { label: "Add walk-in", q: "new" }
+  ];
+
   return (
     <div className="relative" ref={wrapperRef}>
-        {answer ? (
-          <CoPilotAnswerCard
-            answer={answer}
-            onClose={() => setAnswer(null)}
-            onPickPatient={(hit) => {
-              setAnswer(null);
-              onPickPatient(hit);
-            }}
-            onAction={(action) => {
-              setAnswer(null);
-              onAnswerAction(action);
-            }}
-          />
-        ) : openResults ? (
-          <CoPilotResultsList
-            loading={loading}
-            results={results}
-            onPick={(hit) => {
-              setOpenResults(false);
-              onPickPatient(hit);
-            }}
-            onNewPatient={onSubmitNewPatient}
-          />
+        {/* ---------- Floating rich surface — translucent amber glass ---------- */}
+        {showSurface ? (
+          <div
+            className="qcare-modal-in absolute bottom-full left-0 right-0 mb-3 overflow-hidden rounded-[32px] border border-[#F59E0B]/30 bg-white/85 shadow-[0_40px_80px_-20px_rgba(217,119,6,0.45),0_0_100px_-24px_rgba(245,158,11,0.35)] backdrop-blur-2xl"
+            style={{ transformOrigin: "50% 100%" }}
+          >
+            {/* ambient amber top wash */}
+            <span
+              aria-hidden
+              className="pointer-events-none absolute -top-24 left-1/2 h-[320px] w-[320px] -translate-x-1/2 rounded-full"
+              style={{
+                background:
+                  "radial-gradient(circle, rgba(245,158,11,0.26) 0%, rgba(217,119,6,0.08) 45%, rgba(245,158,11,0) 78%)"
+              }}
+            />
+            {/* bronze side wash right */}
+            <span
+              aria-hidden
+              className="pointer-events-none absolute -right-16 top-1/3 h-[220px] w-[220px] rounded-full"
+              style={{
+                background:
+                  "radial-gradient(circle, rgba(217,119,6,0.2) 0%, rgba(180,83,9,0.06) 45%, transparent 75%)"
+              }}
+            />
+            <div className="relative p-5">
+              {/* Header — mini orb + greeting */}
+              <div className="flex items-center gap-3">
+                <PranaAmberMark
+                  activationKey={wakeKey}
+                  boxSize={42}
+                  className="shrink-0"
+                  glyphSize={18}
+                  thinking={asking}
+                />
+                <div className="min-w-0">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.28em] text-[#B45309]">
+                    Prāṇa
+                  </p>
+                  <p className="text-[11px] font-semibold text-[#78716C]">
+                    {asking
+                      ? "Thinking…"
+                      : answer
+                        ? "Here's what I found."
+                        : showResults
+                          ? "Matching patients"
+                          : "How can I help?"}
+                  </p>
+                </div>
+                {asking ? (
+                  <div className="ml-auto flex items-center gap-1">
+                    {[0, 1, 2].map((i) => (
+                      <span
+                        className="h-1.5 w-1.5 rounded-full bg-[#D97706] shadow-[0_0_8px_rgba(217,119,6,0.55)]"
+                        key={i}
+                        style={{
+                          animation: "qcareBreathe 1s ease-in-out infinite",
+                          animationDelay: `${i * 140}ms`
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              {/* Suggestions — empty focused state */}
+              {showSuggestions ? (
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {SUGGESTIONS.map((s, i) => (
+                    <button
+                      className="qcare-list-item-in group/s inline-flex items-center gap-1.5 rounded-full border border-[#FDE68A] bg-white/70 px-3.5 py-1.5 text-[12px] font-semibold text-[#B45309] transition-all duration-300 hover:-translate-y-[1px] hover:border-[#FCD34D] hover:bg-[#FFFBEB] hover:shadow-[0_10px_22px_-10px_rgba(217,119,6,0.5)]"
+                      key={s.label}
+                      onClick={() => {
+                        onChange(s.q);
+                        window.setTimeout(() => {
+                          if (looksLikeQuestion(s.q)) void askQuestion(s.q);
+                          else if (/^(new|add|walk)/i.test(s.q)) onSubmitNewPatient();
+                        }, 0);
+                      }}
+                      style={{ ["--i" as string]: i } as React.CSSProperties}
+                      type="button"
+                    >
+                      <span>{s.label}</span>
+                      <ChevronRight className="h-3 w-3 transition-transform duration-200 group-hover/s:translate-x-0.5" />
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+
+              {/* Inline search results */}
+              {showResults ? (
+                <div className="mt-3 max-h-[44vh] overflow-y-auto rounded-2xl border border-[#FDE68A] bg-white/70 p-1.5">
+                  {loading ? (
+                    <p className="px-3 py-3 text-sm font-medium text-[#8B97AD]">
+                      Searching…
+                    </p>
+                  ) : results.length === 0 ? (
+                    <div className="flex items-center justify-between gap-2 px-3 py-2">
+                      <p className="text-sm font-medium text-[#8B97AD]">
+                        No patient found.
+                      </p>
+                      <button
+                        className="rounded-full bg-[linear-gradient(135deg,#F59E0B_0%,#D97706_55%,#B45309_100%)] px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-white shadow-[0_8px_18px_-14px_rgba(217,119,6,0.7)]"
+                        onClick={() => {
+                          setFocused(false);
+                          onSubmitNewPatient();
+                        }}
+                        type="button"
+                      >
+                        Check-in new
+                      </button>
+                    </div>
+                  ) : (
+                    <ul className="grid gap-1">
+                      {results.slice(0, 6).map((r, i) => (
+                        <li
+                          className="qcare-list-item-in"
+                          key={r.id}
+                          style={{ ["--i" as string]: i } as React.CSSProperties}
+                        >
+                          <button
+                            className="flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left transition hover:bg-[#FFFBEB]"
+                            onClick={() => {
+                              setFocused(false);
+                              onPickPatient(r);
+                            }}
+                            type="button"
+                          >
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-bold text-[#0B1840]">
+                                {r.name}
+                                <span className="ml-2 text-[11px] font-semibold text-[#8B97AD]">
+                                  {r.phone}
+                                </span>
+                              </p>
+                              <p className="mt-0.5 text-[11px] font-medium text-[#6A7283]">
+                                {r.totalVisits} visit
+                                {r.totalVisits === 1 ? "" : "s"}
+                                {r.todayToken ? (
+                                  <span className="ml-2 rounded-full bg-[#DCFCE7] px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[#047857]">
+                                    Today #{r.todayToken.token_number} ·{" "}
+                                    {r.todayToken.status}
+                                  </span>
+                                ) : null}
+                              </p>
+                            </div>
+                            <ChevronRight className="h-4 w-4 shrink-0 text-[#94A3B8]" />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+
+              {/* Answer */}
+              {answer ? (
+                <div className="qcare-list-item-in mt-3 rounded-2xl border border-[#FDE68A] bg-[linear-gradient(145deg,#FFFEF8_0%,#FEF3C7_100%)] p-4">
+                  <p className="text-sm font-bold leading-snug text-[#0B1840]">
+                    {answer.answer}
+                  </p>
+                  {answer.patient ? (
+                    <button
+                      className="mt-3 flex w-full items-center justify-between gap-2 rounded-2xl border border-[#FDE68A] bg-white px-3 py-2 text-left transition hover:border-[#FCD34D] hover:bg-[#FFFBEB]"
+                      onClick={() => {
+                        const p = answer.patient!;
+                        setAnswer(null);
+                        setFocused(false);
+                        onPickPatient(p);
+                      }}
+                      type="button"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold text-[#0B1840]">
+                          {answer.patient.name}
+                          <span className="ml-2 text-[11px] font-semibold text-[#8B97AD]">
+                            {answer.patient.phone}
+                          </span>
+                        </p>
+                        <p className="mt-0.5 text-[11px] font-medium text-[#6A7283]">
+                          {answer.patient.totalVisits} visit
+                          {answer.patient.totalVisits === 1 ? "" : "s"}
+                          {answer.patient.todayToken ? (
+                            <span className="ml-2 rounded-full bg-[#DCFCE7] px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[#047857]">
+                              Today #{answer.patient.todayToken.token_number} ·{" "}
+                              {answer.patient.todayToken.status}
+                            </span>
+                          ) : null}
+                        </p>
+                      </div>
+                      <ChevronRight className="h-4 w-4 text-[#8B97AD]" />
+                    </button>
+                  ) : null}
+                  {answer.actions.length > 0 ? (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {answer.actions.map((a) => (
+                        <button
+                          className="inline-flex items-center gap-1.5 rounded-full border border-[#FDE68A] bg-white px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-[#B45309] transition hover:-translate-y-[1px] hover:border-[#FCD34D] hover:bg-[#FFFBEB]"
+                          key={a.label}
+                          onClick={() => {
+                            setAnswer(null);
+                            setFocused(false);
+                            onAnswerAction(a);
+                          }}
+                          type="button"
+                        >
+                          {a.kind === "call" ? <Phone className="h-3 w-3" /> : null}
+                          {a.kind === "checkin" ? (
+                            <UserPlus className="h-3 w-3" />
+                          ) : null}
+                          {a.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {showSuggestions || answer ? (
+                <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.28em] text-[#B4966A]">
+                  Enter to send · Esc to close
+                </p>
+              ) : null}
+            </div>
+          </div>
         ) : null}
-        <div className="flex flex-wrap items-center gap-3 rounded-[24px] border border-[#E0E7FF] bg-white/95 p-3 shadow-[0_24px_48px_-24px_rgba(79,70,229,0.35)] backdrop-blur-xl">
-          <span className="flex h-9 items-center gap-1.5 rounded-full border border-[#E0E7FF] bg-[linear-gradient(135deg,#EEF2FF_0%,#F8FAFF_100%)] px-3 text-[10px] font-bold uppercase tracking-[0.18em] text-[#4F46E5]">
-            <Sparkles className="h-3.5 w-3.5" />
-            Co-pilot
-          </span>
-          <input
-            className="h-11 flex-1 rounded-full border border-[#E2E8F0] bg-white px-4 text-sm font-medium text-[#0B1840] placeholder:text-[#94A3B8]"
-            onChange={(e) => onChange(e.target.value)}
-            onFocus={() => {
-              if (value.trim().length >= 2 && !looksLikeQuestion(value)) setOpenResults(true);
+
+        {/* ---------- The bar itself — translucent amber glass ---------- */}
+        <div
+          className="group/bar relative flex cursor-text items-center gap-4 overflow-hidden rounded-[28px] border border-[#F59E0B]/30 bg-white/75 p-3 shadow-[0_24px_48px_-24px_rgba(217,119,6,0.32)] backdrop-blur-xl transition-all duration-500 focus-within:border-[#F59E0B]/55 focus-within:bg-white/85 focus-within:shadow-[0_30px_60px_-22px_rgba(217,119,6,0.5),0_0_90px_-28px_rgba(245,158,11,0.45)]"
+          onClick={() => {
+            setFocused(true);
+            inputRef.current?.focus();
+          }}
+        >
+          {/* Soft amber wash from left — golden-hour sunlight through glass */}
+          <span
+            aria-hidden
+            className="pointer-events-none absolute -left-20 top-1/2 h-[220px] w-[220px] -translate-y-1/2 opacity-55 transition-opacity duration-700 group-focus-within/bar:opacity-100"
+            style={{
+              background:
+                "radial-gradient(circle, rgba(245,158,11,0.26) 0%, rgba(245,158,11,0.08) 42%, transparent 72%)"
             }}
+          />
+          {/* Bronze wash from the right */}
+          <span
+            aria-hidden
+            className="pointer-events-none absolute -right-20 top-1/2 h-[200px] w-[200px] -translate-y-1/2 opacity-35 transition-opacity duration-700 group-focus-within/bar:opacity-75"
+            style={{
+              background:
+                "radial-gradient(circle, rgba(217,119,6,0.22) 0%, rgba(180,83,9,0.06) 42%, transparent 72%)"
+            }}
+          />
+
+          {/* Amber floor bloom — pulses outward on activation, now softer to
+              match the translucent bar */}
+          {wakeKey > 0 ? (
+            <span
+              aria-hidden
+              className="qcare-prana-amber-bloom pointer-events-none absolute left-0 top-1/2 h-[240px] w-[240px] -translate-y-1/2 rounded-full"
+              key={`bloom-${wakeKey}`}
+              style={{
+                background:
+                  "radial-gradient(circle, rgba(253,230,138,0.45) 0%, rgba(251,191,36,0.22) 32%, rgba(245,158,11,0.1) 58%, transparent 82%)"
+              }}
+            />
+          ) : null}
+
+          {/* Activation waveform — draws out, peaks, dissolves */}
+          {wakeKey > 0 ? (
+            <PranaActivationWave key={`wave-${wakeKey}`} />
+          ) : null}
+
+          <PranaAmberMark
+            activationKey={wakeKey}
+            boxSize={56}
+            className="shrink-0"
+            glyphSize={22}
+            ripple
+            thinking={asking}
+          />
+
+          <input
+            className="relative h-11 flex-1 border-0 bg-transparent px-1 text-[15px] font-medium tracking-[0.005em] text-[#0B1840] caret-[#D97706] outline-none placeholder:text-[#A89072] focus:ring-0"
+            onChange={(e) => {
+              onChange(e.target.value);
+              if (!focused) setFocused(true);
+            }}
+            onFocus={() => setFocused(true)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                const q = value.trim();
-                if (!q) return;
-                if (looksLikeQuestion(q)) {
-                  setOpenResults(false);
-                  void askQuestion(q);
-                  return;
-                }
-                const phone = q.replace(/[^\d+]/g, "");
-                if (phone.length >= 7) onSubmitPhone(phone);
-                else if (/^(new|add|walk)/i.test(q)) onSubmitNewPatient();
-                else if (results.length === 1) onPickPatient(results[0]);
+                submit();
+                return;
               }
               if (e.key === "Escape") {
-                setOpenResults(false);
+                setFocused(false);
                 setAnswer(null);
+                (e.currentTarget as HTMLInputElement).blur();
               }
             }}
-            placeholder={`Ask: "Is Swaminathan a returning patient?" · or type a phone / name`}
+            placeholder="Ask Prāṇa, or type a phone / name…"
             ref={inputRef}
             value={value}
           />
           {asking ? (
-            <span className="text-[11px] font-semibold text-[#4F46E5]">Thinking…</span>
-          ) : (
-            <span className="hidden text-[11px] font-semibold text-[#8B97AD] md:inline">
-              <Kbd>/</Kbd> focus · <Kbd>⌘K</Kbd> journeys
+            <span className="relative flex items-center gap-1 pr-1.5">
+              {[0, 1, 2].map((i) => (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-[#D97706] shadow-[0_0_8px_rgba(217,119,6,0.55)]"
+                  key={i}
+                  style={{
+                    animation: "qcareBreathe 1s ease-in-out infinite",
+                    animationDelay: `${i * 140}ms`
+                  }}
+                />
+              ))}
             </span>
-          )}
+          ) : null}
         </div>
       </div>
   );
 }
 
-function CoPilotAnswerCard({
-  answer,
-  onClose,
-  onPickPatient,
-  onAction
-}: {
-  answer: CoPilotAnswer;
-  onClose: () => void;
-  onPickPatient: (hit: PatientHit) => void;
-  onAction: (action: { label: string; href?: string; kind: "link" | "call" | "checkin" }) => void;
-}) {
-  const p = answer.patient;
-  return (
-    <div className="absolute bottom-full left-0 right-0 mb-2 rounded-[28px] border border-white bg-white/98 p-4 shadow-[0_30px_60px_-20px_rgba(15,23,42,0.35)] backdrop-blur-xl">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-2">
-          <div className="mt-0.5 flex h-6 w-6 items-center justify-center rounded-full bg-[linear-gradient(135deg,#EEF2FF_0%,#E0E7FF_100%)] text-[#4F46E5]">
-            <Sparkles className="h-3.5 w-3.5" />
-          </div>
-          <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
-              Co-pilot
-            </p>
-            <p className="mt-0.5 text-sm font-bold leading-snug text-[#0B1840]">
-              {answer.answer}
-            </p>
-          </div>
-        </div>
-        <button
-          className="rounded-full p-1.5 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
-          onClick={onClose}
-          type="button"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-
-      {p ? (
-        <button
-          className="mt-3 flex w-full items-center justify-between gap-2 rounded-2xl border border-[#E0E7FF] bg-[#F7F9FF] px-3 py-2 text-left transition hover:border-[#C7D2FE]"
-          onClick={() => onPickPatient(p)}
-          type="button"
-        >
-          <div className="min-w-0">
-            <p className="truncate text-sm font-bold text-[#0B1840]">
-              {p.name}
-              <span className="ml-2 text-[11px] font-semibold text-[#8B97AD]">{p.phone}</span>
-            </p>
-            <p className="mt-0.5 text-[11px] font-medium text-[#6A7283]">
-              {p.totalVisits} visit{p.totalVisits === 1 ? "" : "s"}
-              {p.todayToken ? (
-                <span className="ml-2 rounded-full bg-[#DCFCE7] px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[#047857]">
-                  Today · #{p.todayToken.token_number} · {p.todayToken.status}
-                </span>
-              ) : null}
-            </p>
-          </div>
-          <ChevronDown className="h-4 w-4 -rotate-90 text-[#8B97AD]" />
-        </button>
-      ) : null}
-
-      {answer.actions.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {answer.actions.map((a) => (
-            <button
-              className="inline-flex items-center gap-1.5 rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] text-[#1A2550] transition hover:border-[#CBD5E1]"
-              key={a.label}
-              onClick={() => onAction(a)}
-              type="button"
-            >
-              {a.kind === "call" ? <Phone className="h-3 w-3" /> : null}
-              {a.kind === "checkin" ? <UserPlus className="h-3 w-3" /> : null}
-              {a.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 /* ---------- Lane themes (shared between LaneModal and any lane surface) ---------- */
 
@@ -1748,65 +2343,6 @@ function PostConsultRow({
   );
 }
 
-function CoPilotResultsList({
-  results,
-  loading,
-  onPick,
-  onNewPatient
-}: {
-  results: PatientHit[];
-  loading: boolean;
-  onPick: (hit: PatientHit) => void;
-  onNewPatient: () => void;
-}) {
-  return (
-    <div className="absolute bottom-full left-0 right-0 mb-2 rounded-[24px] border border-white bg-white/98 p-1.5 shadow-[0_30px_60px_-20px_rgba(15,23,42,0.35)] backdrop-blur-xl">
-      {loading ? (
-        <p className="px-3 py-3 text-sm font-medium text-[#8B97AD]">Searching…</p>
-      ) : results.length === 0 ? (
-        <div className="flex items-center justify-between gap-2 px-3 py-2">
-          <p className="text-sm font-medium text-[#8B97AD]">No patient found.</p>
-          <button
-            className="rounded-full bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_100%)] px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.14em] text-white"
-            onClick={onNewPatient}
-            type="button"
-          >
-            Check-in new
-          </button>
-        </div>
-      ) : (
-        <ul className="grid gap-1">
-          {results.slice(0, 6).map((r) => (
-            <li key={r.id}>
-              <button
-                className="flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left hover:bg-[#F7F9FF]"
-                onClick={() => onPick(r)}
-                type="button"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-[#0B1840]">
-                    {r.name}
-                    <span className="ml-2 text-[11px] font-semibold text-[#8B97AD]">
-                      {r.phone}
-                    </span>
-                  </p>
-                  <p className="text-[11px] font-medium text-[#6A7283]">
-                    {r.totalVisits} visit{r.totalVisits === 1 ? "" : "s"}
-                    {r.todayToken ? (
-                      <span className="ml-2 rounded-full bg-[#DCFCE7] px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] text-[#047857]">
-                        Today #{r.todayToken.token_number} · {r.todayToken.status}
-                      </span>
-                    ) : null}
-                  </p>
-                </div>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
 
 function usePatientSearch(query: string) {
   const debounced = useDebounced(query.trim(), 200);
@@ -2083,17 +2619,22 @@ function MetricPill({
   value,
   color,
   tint,
-  onClick
+  onClick,
+  pulse
 }: {
   label: string;
   value: number;
   color: string;
   tint: string;
   onClick?: () => void;
+  pulse?: boolean;
 }) {
   return (
     <button
-      className="group relative overflow-hidden rounded-2xl border px-5 py-2.5 text-center shadow-[0_14px_28px_-18px_rgba(11,24,64,0.28)] min-w-[96px] transition-all duration-200 ease-out hover:-translate-y-[2px] hover:shadow-[0_22px_40px_-14px_rgba(11,24,64,0.4)] focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/30"
+      className={cn(
+        "group relative overflow-hidden rounded-2xl border px-5 py-2.5 text-center shadow-[0_14px_28px_-18px_rgba(11,24,64,0.28)] min-w-[96px] transition-all duration-200 ease-out hover:-translate-y-[2px] hover:shadow-[0_22px_40px_-14px_rgba(11,24,64,0.4)] focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/30",
+        pulse && "qcare-breathe"
+      )}
       disabled={!onClick}
       onClick={onClick}
       style={{
@@ -2211,46 +2752,61 @@ function patientMeta(t: QueueItem) {
  */
 function ContactLine({
   token,
-  tone = "emerald"
+  tone = "emerald",
+  hideMeta = false
 }: {
   token: QueueItem;
   tone?: "emerald" | "indigo" | "sky" | "violet";
+  hideMeta?: boolean;
 }) {
   const phone = token.patients?.phone ?? null;
   const meta = patientMeta(token);
-  const hoverColor =
+  const pillCls =
     tone === "emerald"
-      ? "hover:text-[#047857]"
+      ? "border-[#BBF7D0] text-[#047857] hover:bg-[#F0FDF4] hover:border-[#86EFAC] hover:shadow-[0_8px_20px_-10px_rgba(16,185,129,0.55)]"
       : tone === "indigo"
-        ? "hover:text-[#4F46E5]"
+        ? "border-[#C7D2FE] text-[#4F46E5] hover:bg-[#EEF2FF] hover:border-[#A5B4FC] hover:shadow-[0_8px_20px_-10px_rgba(99,102,241,0.55)]"
         : tone === "sky"
-          ? "hover:text-[#0369A1]"
-          : "hover:text-[#7E22CE]";
+          ? "border-[#BAE6FD] text-[#0369A1] hover:bg-[#F0F9FF] hover:border-[#7DD3FC] hover:shadow-[0_8px_20px_-10px_rgba(14,165,233,0.5)]"
+          : "border-[#E9D5FF] text-[#7E22CE] hover:bg-[#FAF5FF] hover:border-[#D8B4FE] hover:shadow-[0_8px_20px_-10px_rgba(168,85,247,0.5)]";
+
+  if (!phone) {
+    return (
+      <div className="mt-2 text-[11px] font-semibold text-[#94A3B8]">
+        No phone on file
+        {!hideMeta && meta ? <span className="ml-1 text-[#8B97AD]">· {meta}</span> : null}
+      </div>
+    );
+  }
   return (
-    <div className="mt-1.5 flex items-center gap-2 text-xs font-semibold text-[#5C667D]">
-      {phone ? (
-        <>
-          <a
-            className={cn("inline-flex items-center gap-1", hoverColor)}
-            href={`sms:${phone}`}
-            title="Send SMS"
-          >
-            <MessageSquare className="h-3 w-3 shrink-0" />
-            <span>{phone}</span>
-          </a>
-          <a
-            aria-label="Call"
-            className={cn("text-[#8B97AD]", hoverColor)}
-            href={`tel:${phone}`}
-            title="Call"
-          >
-            <Phone className="h-3 w-3 shrink-0" />
-          </a>
-        </>
-      ) : (
-        <span className="text-[#94A3B8]">No phone</span>
-      )}
-      {meta ? <span className="text-[#8B97AD]">· {meta}</span> : null}
+    <div className="mt-2 flex items-center gap-1.5">
+      <a
+        aria-label="Send SMS"
+        className={cn(
+          "group/ctn inline-flex items-center gap-1.5 rounded-full border bg-white/90 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] transition-all duration-200 hover:-translate-y-[1px]",
+          pillCls
+        )}
+        href={`sms:${phone}`}
+        title="Send SMS"
+      >
+        <MessageSquare className="h-4 w-4 shrink-0 transition-transform duration-300 ease-out group-hover/ctn:-rotate-6 group-hover/ctn:scale-[1.35]" />
+        Text
+      </a>
+      <a
+        aria-label="Call"
+        className={cn(
+          "group/ctn inline-flex items-center gap-1.5 rounded-full border bg-white/90 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] transition-all duration-200 hover:-translate-y-[1px]",
+          pillCls
+        )}
+        href={`tel:${phone}`}
+        title="Call"
+      >
+        <Phone className="h-4 w-4 shrink-0 transition-transform duration-300 ease-out group-hover/ctn:rotate-[-12deg] group-hover/ctn:scale-[1.35]" />
+        Call
+      </a>
+      {!hideMeta && meta ? (
+        <span className="ml-1 text-[10px] font-semibold text-[#8B97AD]">{meta}</span>
+      ) : null}
     </div>
   );
 }
@@ -2290,31 +2846,41 @@ type PatientBrief = {
 
 function WithDoctorCard({
   token,
+  clinicName,
   isWorking,
   onDone,
   onHold,
   onSkip,
-  onOpenProfile
+  onCollectPayment,
+  onOpenVitals,
+  onOpenProximity,
+  onOpenInsurance
 }: {
   token: QueueItem | null;
+  clinicName: string;
   isWorking: boolean;
   onDone: (id: string) => void;
   onHold: () => void;
   onSkip: (id: string) => void;
-  onOpenProfile: (patientId: string) => void;
+  onCollectPayment: (token: QueueItem) => void;
+  onOpenVitals: (token: QueueItem) => void;
+  onOpenProximity: (token: QueueItem) => void;
+  onOpenInsurance: (token: QueueItem) => void;
 }) {
   const [flipped, setFlipped] = useState(false);
+  const [isFlipping, setIsFlipping] = useState(false);
   const [brief, setBrief] = useState<PatientBrief | null>(null);
   const [briefLoading, setBriefLoading] = useState(false);
   const patientId = token?.patient_id ?? null;
+  const frontRef = useRef<HTMLDivElement>(null);
+  const orbRef = useRef<HTMLDivElement>(null);
+  const flipMountedRef = useRef(false);
 
-  // Reset flip + brief when the serving token changes
   useEffect(() => {
     setFlipped(false);
     setBrief(null);
   }, [token?.id]);
 
-  // Eagerly fetch brief on token change — used by BOTH front-face pill and back face.
   useEffect(() => {
     if (!patientId) return;
     let cancelled = false;
@@ -2333,7 +2899,16 @@ function WithDoctorCard({
     };
   }, [patientId]);
 
-  // Esc to flip back
+  useEffect(() => {
+    if (!flipMountedRef.current) {
+      flipMountedRef.current = true;
+      return;
+    }
+    setIsFlipping(true);
+    const t = window.setTimeout(() => setIsFlipping(false), 620);
+    return () => window.clearTimeout(t);
+  }, [flipped]);
+
   useEffect(() => {
     if (!flipped) return;
     function onKey(e: KeyboardEvent) {
@@ -2348,16 +2923,25 @@ function WithDoctorCard({
     return () => window.removeEventListener("keydown", onKey);
   }, [flipped]);
 
-  const topSnippet = useMemo(() => {
-    if (!token) return null;
-    const all = buildSnippets(token, brief);
-    return all[0] ?? null;
-  }, [token, brief]);
+  // Cursor hologram — emerald glow matching the card palette
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const host = frontRef.current;
+    const orb = orbRef.current;
+    if (!host || !orb) return;
+    const rect = host.getBoundingClientRect();
+    orb.style.transform = `translate3d(${e.clientX - rect.left - 130}px, ${
+      e.clientY - rect.top - 130
+    }px, 0)`;
+    orb.style.opacity = "1";
+  }
+  function onPointerLeave() {
+    if (orbRef.current) orbRef.current.style.opacity = "0";
+  }
 
   if (!token) {
     return (
-      <div className="flex h-full min-h-[260px] flex-col rounded-[28px] border border-white bg-white/85 px-5 py-4 shadow-[0_20px_40px_-24px_rgba(0,0,0,0.1)] backdrop-blur-xl">
-        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
+      <div className="flex h-full min-h-[260px] flex-col rounded-[28px] border border-[#BBF7D0] bg-[linear-gradient(145deg,#F0FDF4_0%,#DCFCE7_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-24px_rgba(16,185,129,0.22)] backdrop-blur-xl">
+        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#047857]">
           With doctor
         </p>
         <p className="my-auto text-center text-sm font-semibold text-[#8B97AD]">
@@ -2368,138 +2952,256 @@ function WithDoctorCard({
   }
 
   const elapsed = minutesSince(token.serving_started_at ?? token.checked_in_at);
+  const complaint = token.raw_complaint?.trim() ?? "";
+  const complaintIsRedFlag = complaint ? RED_FLAG_RE.test(complaint) : false;
 
   return (
-    <div className="group h-full transition-transform duration-200 ease-out hover:-translate-y-[2px] [perspective:1400px]">
+    <div className="group h-full [perspective:1400px]">
       <div
         className={cn(
-          "relative h-full [transform-style:preserve-3d] transition-transform duration-300 ease-out will-change-transform",
+          "h-full transition-transform duration-200 ease-out hover:-translate-y-[2px]",
+          isFlipping && "qcare-flip-lift"
+        )}
+      >
+      <div
+        className={cn(
+          "relative h-full [transform-style:preserve-3d] transition-transform duration-[520ms] will-change-transform [transition-timing-function:cubic-bezier(0.4,0,0.2,1)]",
           flipped && "[transform:rotateY(180deg)]"
         )}
       >
-        {/* FRONT FACE */}
-        <div className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#BBF7D0] bg-[linear-gradient(145deg,#F0FDF4_0%,#DCFCE7_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(16,185,129,0.4)] transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(16,185,129,0.55)] [backface-visibility:hidden]">
-          <div className="pointer-events-none absolute inset-0 qcare-breathe bg-[radial-gradient(circle_at_75%_20%,rgba(16,185,129,0.18)_0%,rgba(255,255,255,0)_60%)]" />
-          <div className="relative flex flex-1 flex-col">
-            <div>
-              <div className="flex items-center justify-between">
-                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#047857]">
-                  With doctor
-                </p>
-                <span className="qcare-breathe inline-flex items-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#DCFCE7_0%,#BBF7D0_100%)] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#047857]">
-                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#10B981]" />
-                  {formatDur(elapsed)}
-                </span>
-              </div>
-              <div className="mt-2">
-                <p className="text-[28px] font-extrabold leading-[1] tracking-[-0.03em] tabular-nums text-[#0B1840]">
-                  #{token.token_number}
-                </p>
-                <button
-                  aria-expanded={flipped}
-                  className="mt-1 flex w-full items-center gap-1 text-left text-base font-bold leading-[1.2] text-[#1A2550] transition group-hover:text-[#047857]"
-                  onClick={() => setFlipped(true)}
-                  title="Show briefing"
-                  type="button"
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {token.patients?.name ?? "Patient"}
-                  </span>
-                  <ChevronRight
-                    aria-hidden
-                    className="h-4 w-4 shrink-0 text-[#94A3B8] transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-[#047857]"
-                  />
-                </button>
-              </div>
-              <div className="mt-1.5 flex flex-wrap items-center gap-1">
-                {patientChips(token, new Date())}
-              </div>
-              <ContactLine token={token} tone="emerald" />
+        {/* FRONT */}
+        <div
+          className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#BBF7D0] bg-[linear-gradient(145deg,#F0FDF4_0%,#DCFCE7_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(16,185,129,0.4)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(16,185,129,0.55)] [backface-visibility:hidden]"
+          onPointerLeave={onPointerLeave}
+          onPointerMove={onPointerMove}
+          ref={frontRef}
+        >
+          {/* Cursor spotlight — emerald ambient glow */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute left-0 top-0 z-0 h-[260px] w-[260px] opacity-0 transition-opacity duration-300 ease-out"
+            ref={orbRef}
+            style={{
+              background:
+                "radial-gradient(circle, rgba(16,185,129,0.2) 0%, rgba(16,185,129,0.08) 35%, rgba(16,185,129,0) 70%)",
+              willChange: "transform, opacity"
+            }}
+          />
 
-              {/* Top brief snippet — surfaced so she never has to flip to see the critical thing */}
-              {topSnippet ? (
-                <button
-                  className={cn(
-                    "mt-2.5 inline-flex max-w-full items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold transition hover:brightness-[0.98]",
-                    topSnippet.tone === "safety" &&
-                      "bg-[#FEE2E2] text-[#B91C1C]",
-                    topSnippet.tone === "people" &&
-                      "bg-[#EEF2FF] text-[#4F46E5]",
-                    topSnippet.tone === "ops" && "bg-[#F1F5F9] text-[#475569]"
-                  )}
-                  onClick={() => setFlipped(true)}
-                  title="Open briefing"
-                  type="button"
-                >
-                  {topSnippet.tone === "safety" ? (
-                    <AlertTriangle className="h-3 w-3 shrink-0" />
-                  ) : (
-                    <span
-                      className={cn(
-                        "h-1.5 w-1.5 shrink-0 rounded-full",
-                        topSnippet.tone === "people" ? "bg-[#4F46E5]" : "bg-[#94A3B8]"
-                      )}
-                    />
-                  )}
-                  <span className="truncate">{topSnippet.text}</span>
-                </button>
-              ) : null}
+          <div className="relative z-10 flex h-full min-h-0 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            {/* Header — kicker + elapsed pill */}
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#047857]">
+                With doctor
+              </p>
+              <span className="qcare-breathe inline-flex items-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#DCFCE7_0%,#BBF7D0_100%)] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#047857] ring-1 ring-[#86EFAC]">
+                <Clock className="h-3 w-3" />
+                <span className="opacity-70">serving</span>
+                <span className="tabular-nums">{formatDur(elapsed)}</span>
+              </span>
             </div>
 
-            {/* Actions pushed to bottom */}
-            <div className="mt-auto flex flex-wrap gap-1.5 pt-3">
-              <Btn disabled={isWorking} onClick={() => onDone(token.id)} tone="primary">
-                Done · D
-              </Btn>
-              <Btn disabled={isWorking} onClick={() => onHold()} tone="outline">
-                Hold · H
-              </Btn>
-              <Btn disabled={isWorking} onClick={() => onSkip(token.id)} tone="outline">
-                Skip · S
-              </Btn>
-            </div>
-          </div>
-        </div>
-
-        {/* BACK FACE — calmer, paper-like, briefing */}
-        <div className="absolute inset-0 flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E2E8F0] bg-white/95 px-5 py-4 shadow-[0_18px_34px_-24px_rgba(15,23,42,0.25)] [backface-visibility:hidden] [transform:rotateY(180deg)]">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#6A7283]">
-              Briefing
-            </p>
+            {/* Name hero — same grammar as NextCard */}
             <button
-              aria-label="Flip back"
-              className="rounded-full p-1 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
-              onClick={() => setFlipped(false)}
+              aria-expanded={flipped}
+              className="group/name relative mt-2 flex items-baseline gap-2 text-left"
+              onClick={() => setFlipped(true)}
+              title="Show briefing"
               type="button"
             >
-              <X className="h-3.5 w-3.5" />
+              <span
+                className="relative min-w-0 flex-1 truncate text-[22px] font-extrabold leading-[1.1] tracking-[-0.02em] text-[#0B1840] transition-[letter-spacing] duration-300 ease-out group-hover/name:tracking-[-0.025em]"
+                title={token.patients?.name ?? undefined}
+              >
+                {formatPatientName(token.patients?.name)}
+                {patientMeta(token) ? (
+                  <span className="ml-2 text-[12px] font-semibold tracking-normal text-[#6A7283]">
+                    {patientMeta(token)}
+                  </span>
+                ) : null}
+                <span
+                  aria-hidden
+                  className="absolute -bottom-0.5 left-0 h-[2px] w-0 rounded-full bg-[linear-gradient(90deg,#10B981_0%,#6EE7B7_100%)] transition-[width] duration-400 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/name:w-full"
+                />
+              </span>
+              <span className="shrink-0 rounded-md bg-white/70 px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-[0.14em] tabular-nums text-[#047857] ring-1 ring-[#BBF7D0] transition-colors duration-300 group-hover/name:bg-[#F0FDF4] group-hover/name:ring-[#86EFAC]">
+                #{token.token_number}
+              </span>
+              <ChevronRight
+                aria-hidden
+                className="h-4 w-4 shrink-0 self-center text-[#6EE7B7] transition-all duration-300 ease-out group-hover/name:translate-x-1 group-hover/name:text-[#047857]"
+              />
+            </button>
+
+            {/* Readiness indicators (tappable) */}
+            <PreflightRow
+              onFixProximity={() => onOpenProximity(token)}
+              onFixVitals={() => onOpenVitals(token)}
+              onInsurance={() =>
+                token.patients?.insurance_provider
+                  ? onOpenInsurance(token)
+                  : onCollectPayment(token)
+              }
+              token={token}
+            />
+
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              {patientChips(token, new Date())}
+            </div>
+
+            <ContactLine hideMeta token={token} tone="emerald" />
+
+            {/* Here for — the *why*, same block as NextCard */}
+            {complaint ? (
+              <div
+                className={cn(
+                  "mt-3 rounded-2xl border px-4 py-3.5 backdrop-blur-sm",
+                  complaintIsRedFlag
+                    ? "border-[#FECACA] bg-[#FFF5F5]/90 shadow-[0_10px_24px_-14px_rgba(185,28,28,0.35)]"
+                    : "border-white/90 bg-white/85 shadow-[0_10px_24px_-16px_rgba(16,185,129,0.28)]"
+                )}
+              >
+                <div className="flex items-center gap-1.5">
+                  {complaintIsRedFlag ? (
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[#B91C1C]" />
+                  ) : null}
+                  <p
+                    className={cn(
+                      "text-[10px] font-bold uppercase tracking-[0.2em]",
+                      complaintIsRedFlag ? "text-[#B91C1C]" : "text-[#047857]"
+                    )}
+                  >
+                    Here for
+                  </p>
+                </div>
+                <p
+                  className={cn(
+                    "mt-1 line-clamp-3 text-[15px] font-extrabold leading-snug tracking-[-0.01em]",
+                    complaintIsRedFlag ? "text-[#991B1B]" : "text-[#0B1840]"
+                  )}
+                >
+                  {complaint}
+                </p>
+                {brief && (brief.totalVisits > 1 || brief.lastToken) ? (
+                  <div className="mt-2 flex items-start gap-1.5 border-t border-[#E8F3EE] pt-2">
+                    <Sparkles className="mt-[2px] h-3 w-3 shrink-0 text-[#6EE7B7]" />
+                    <p className="text-[11px] font-semibold leading-snug text-[#5C667D]">
+                      {brief.totalVisits > 1 ? (
+                        <>
+                          <span className="text-[#047857]">Returning</span>
+                          {" · "}
+                          {brief.totalVisits} visits
+                        </>
+                      ) : (
+                        <span className="text-[#047857]">First visit</span>
+                      )}
+                      {brief.lastToken?.raw_complaint ? (
+                        <span className="text-[#8B97AD]">
+                          {" · last: "}
+                          <span className="italic">
+                            {brief.lastToken.raw_complaint}
+                          </span>
+                        </span>
+                      ) : null}
+                    </p>
+                  </div>
+                ) : briefLoading ? (
+                  <div className="mt-2 flex items-center gap-1.5 border-t border-[#E8F3EE] pt-2">
+                    <Sparkles className="h-3 w-3 shrink-0 text-[#6EE7B7]" />
+                    <p className="text-[11px] font-semibold italic text-[#94A3B8]">
+                      Gathering context…
+                    </p>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          {/* Action buttons — Done (primary emerald, shimmer) + Hold + Skip.
+              All three share the same dimensions; hierarchy reads via color,
+              not size. */}
+          <div className="mt-auto grid shrink-0 grid-cols-3 gap-1.5 pt-3">
+            {/* Done — emerald premium pill matching the Start-consultation grammar */}
+            <button
+              className="group/cta relative inline-flex items-center justify-center gap-1.5 overflow-hidden rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_55%,#047857_100%)] px-3 py-2.5 text-[11px] font-bold uppercase tracking-[0.14em] text-white shadow-[0_10px_24px_-10px_rgba(16,185,129,0.75),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:shadow-[0_16px_32px_-10px_rgba(16,185,129,0.9),inset_0_1px_0_rgba(255,255,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+              disabled={isWorking}
+              onClick={() => onDone(token.id)}
+              type="button"
+            >
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.35)_50%,transparent_100%)] transition-transform duration-700 ease-out group-hover/cta:translate-x-[300%]"
+              />
+              <span className="relative z-10">Done · D</span>
+              <ChevronRight
+                aria-hidden
+                className="relative z-10 h-3.5 w-3.5 transition-transform duration-200 ease-out group-hover/cta:translate-x-0.5"
+              />
+            </button>
+
+            {/* Hold — emerald outline */}
+            <button
+              className="group/sec inline-flex items-center justify-center gap-1.5 rounded-full border border-[#BBF7D0] bg-white/80 px-3 py-2.5 text-[11px] font-bold uppercase tracking-[0.14em] text-[#047857] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:border-[#86EFAC] hover:bg-[#F0FDF4] hover:shadow-[0_10px_20px_-10px_rgba(16,185,129,0.55)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+              disabled={isWorking}
+              onClick={onHold}
+              type="button"
+            >
+              <PauseCircle className="h-3.5 w-3.5 transition-transform duration-200 group-hover/sec:scale-110" />
+              Hold · H
+            </button>
+
+            {/* Skip — rose outline (negative action) */}
+            <button
+              className="group/sec inline-flex items-center justify-center gap-1.5 rounded-full border border-[#FECACA] bg-white/80 px-3 py-2.5 text-[11px] font-bold uppercase tracking-[0.14em] text-[#B91C1C] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:border-[#FCA5A5] hover:bg-[#FFF1F2] hover:shadow-[0_10px_20px_-10px_rgba(220,38,38,0.5)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+              disabled={isWorking}
+              onClick={() => onSkip(token.id)}
+              type="button"
+            >
+              Skip · S
             </button>
           </div>
-          <div className="mt-1.5 flex items-baseline gap-3">
-            <span className="text-[22px] font-extrabold leading-none tracking-[-0.03em] text-[#0B1840] tabular-nums">
-              #{token.token_number}
-            </span>
-            <span className="truncate text-sm font-bold text-[#1A2550]">
-              {token.patients?.name ?? "Patient"}
-            </span>
-          </div>
-          <BriefFaceBody token={token} brief={brief} loading={briefLoading} />
-          <div className="mt-auto flex flex-wrap gap-1.5 pt-3">
-            {token.patients?.phone ? (
-              <a
-                className="inline-flex items-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_100%)] px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] text-white shadow-[0_8px_18px_-14px_rgba(79,70,229,0.7)]"
-                href={`tel:${token.patients.phone}`}
-              >
-                <Phone className="h-3 w-3" />
-                Call
-              </a>
-            ) : null}
-            <Btn onClick={() => patientId && onOpenProfile(patientId)} tone="outline">
-              Full profile
-            </Btn>
           </div>
         </div>
+
+        {/* BACK — dossier, same pattern as NextCard */}
+        <div className="absolute inset-0 flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E6E8EF] bg-[linear-gradient(180deg,#FDFDFE_0%,#F8F9FC_100%)] px-5 py-4 shadow-[0_18px_34px_-24px_rgba(15,23,42,0.25)] [backface-visibility:hidden] [transform:rotateY(180deg)]">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-[0.35]"
+            style={{
+              backgroundImage:
+                "linear-gradient(to right, rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.06) 1px, transparent 1px)",
+              backgroundSize: "22px 22px"
+            }}
+          />
+          <div className="relative flex h-full min-h-0 flex-col">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#047857]">
+                Dossier
+              </p>
+              <button
+                aria-label="Flip back"
+                className="rounded-full p-1 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
+                onClick={() => setFlipped(false)}
+                type="button"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {flipped ? (
+              <NextDossierBody
+                brief={brief}
+                clinicName={clinicName}
+                key={`dossier-${token.id}`}
+                loading={briefLoading}
+                token={token}
+              />
+            ) : null}
+          </div>
+        </div>
+      </div>
       </div>
     </div>
   );
@@ -2690,7 +3392,11 @@ function NextCard({
   isWorking,
   behind,
   onStart,
-  onOpenProfile
+  onOpenProfile,
+  onCollectPayment,
+  onOpenVitals,
+  onOpenProximity,
+  onOpenInsurance
 }: {
   token: QueueItem | null;
   clinicName: string;
@@ -2699,17 +3405,37 @@ function NextCard({
   behind: number;
   onStart: (id: string) => void;
   onOpenProfile: (patientId: string) => void;
+  onCollectPayment: (token: QueueItem) => void;
+  onOpenVitals: (token: QueueItem) => void;
+  onOpenProximity: (token: QueueItem) => void;
+  onOpenInsurance: (token: QueueItem) => void;
 }) {
   const [flipped, setFlipped] = useState(false);
+  const [isFlipping, setIsFlipping] = useState(false);
   const [brief, setBrief] = useState<PatientBrief | null>(null);
   const [briefLoading, setBriefLoading] = useState(false);
   const patientId = token?.patient_id ?? null;
+  const frontRef = useRef<HTMLDivElement>(null);
+  const orbRef = useRef<HTMLDivElement>(null);
+  const flipMountedRef = useRef(false);
 
   // Reset flip + brief when token changes
   useEffect(() => {
     setFlipped(false);
     setBrief(null);
   }, [token?.id]);
+
+  // Paper-lift animation on each flip. Skip the first mount so it doesn't
+  // fire on open.
+  useEffect(() => {
+    if (!flipMountedRef.current) {
+      flipMountedRef.current = true;
+      return;
+    }
+    setIsFlipping(true);
+    const t = window.setTimeout(() => setIsFlipping(false), 620);
+    return () => window.clearTimeout(t);
+  }, [flipped]);
 
   // Fetch brief eagerly so flip is instant
   useEffect(() => {
@@ -2745,10 +3471,25 @@ function NextCard({
     return () => window.removeEventListener("keydown", onKey);
   }, [flipped]);
 
+  // Cursor hologram — direct DOM mutation for 60fps feel
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const host = frontRef.current;
+    const orb = orbRef.current;
+    if (!host || !orb) return;
+    const rect = host.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    orb.style.transform = `translate3d(${x - 130}px, ${y - 130}px, 0)`;
+    orb.style.opacity = "1";
+  }
+  function onPointerLeave() {
+    if (orbRef.current) orbRef.current.style.opacity = "0";
+  }
+
   if (!token) {
     return (
-      <div className="flex h-full min-h-[260px] flex-col rounded-[28px] border border-[#BAE6FD] bg-[linear-gradient(145deg,#F0F9FF_0%,#E0F2FE_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-24px_rgba(14,165,233,0.22)] backdrop-blur-xl">
-        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#0369A1]">
+      <div className="flex h-full min-h-[260px] flex-col rounded-[28px] border border-[#C7D2FE] bg-[linear-gradient(145deg,#EEF2FF_0%,#E0E7FF_55%,#F5F7FF_100%)] px-5 py-4 shadow-[0_20px_40px_-24px_rgba(79,70,229,0.3)] backdrop-blur-xl">
+        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
           Next up
         </p>
         <p className="my-auto text-center text-sm font-semibold text-[#8B97AD]">
@@ -2758,142 +3499,492 @@ function NextCard({
     );
   }
   const waited = minutesSince(token.checked_in_at);
+  const visibleUpcoming = upcoming.slice(0, 1);
+  const moreCount = Math.max(0, behind - visibleUpcoming.length);
+  const complaint = token.raw_complaint?.trim() ?? "";
+  const complaintIsRedFlag = complaint ? RED_FLAG_RE.test(complaint) : false;
 
   return (
-    <div className="group h-full transition-transform duration-200 ease-out hover:-translate-y-[2px] [perspective:1400px]">
+    <div className="group h-full [perspective:1400px]">
       <div
         className={cn(
-          "relative h-full [transform-style:preserve-3d] transition-transform duration-300 ease-out will-change-transform",
+          "h-full transition-transform duration-200 ease-out hover:-translate-y-[2px]",
+          isFlipping && "qcare-flip-lift"
+        )}
+      >
+      <div
+        className={cn(
+          "relative h-full [transform-style:preserve-3d] transition-transform duration-[520ms] will-change-transform [transition-timing-function:cubic-bezier(0.4,0,0.2,1)]",
           flipped && "[transform:rotateY(180deg)]"
         )}
       >
         {/* FRONT */}
-        <div className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#BAE6FD] bg-[linear-gradient(145deg,#F0F9FF_0%,#E0F2FE_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(14,165,233,0.32)] transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(14,165,233,0.5)] [backface-visibility:hidden]">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#0369A1]">
-              Next up
-            </p>
-            <span className="rounded-full bg-[linear-gradient(135deg,#E0F2FE_0%,#BAE6FD_100%)] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#0369A1]">
-              waited {formatDur(waited)}
-            </span>
-          </div>
-          <div className="mt-2">
-            <p
-              className={cn(
-                "text-[28px] font-extrabold leading-[1] tracking-[-0.03em] tabular-nums",
-                tokenNeedsCall(token) ? "text-[#B91C1C]" : "text-[#0B1840]"
-              )}
-              title={tokenNeedsCall(token) ? "Check-in SMS didn't deliver — call them" : undefined}
-            >
-              #{token.token_number}
-            </p>
-            <button
-              aria-expanded={flipped}
-              className="mt-1 flex w-full items-center gap-1 text-left text-base font-bold leading-[1.2] text-[#1A2550] transition group-hover:text-[#0369A1]"
-              onClick={() => setFlipped(true)}
-              title="Show briefing"
-              type="button"
-            >
-              <span className="min-w-0 flex-1 truncate">
-                {token.patients?.name ?? "Patient"}
-              </span>
-              <ChevronRight
-                aria-hidden
-                className="h-4 w-4 shrink-0 text-[#94A3B8] transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-[#0369A1]"
-              />
-            </button>
-          </div>
-          <div className="mt-1.5 flex flex-wrap items-center gap-1">
-            {patientChips(token, new Date())}
-          </div>
-          <ContactLine token={token} tone="sky" />
-          <PreflightRow token={token} />
-          <p className="mt-1 text-[11px] font-semibold text-[#8B97AD]">
-            {behind} more behind
-          </p>
-          {upcoming.length > 0 ? (
-            <div className="mt-3 rounded-2xl border border-[#E2E8F0] bg-white/70 p-2.5">
-              <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
-                Then
-              </p>
-              <div className="mt-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 text-[11px] font-semibold text-[#1A2550]">
-                {upcoming.map((u) => (
-                  <Fragment key={u.id}>
-                    <span className="tabular-nums text-[#4F46E5]">
-                      #{u.token_number}
-                    </span>
-                    <span className="truncate">
-                      {u.patients?.name ?? "Patient"}
-                    </span>
-                    <span className="text-[#8B97AD]">
-                      {formatDur(minutesSince(u.checked_in_at))}
-                    </span>
-                  </Fragment>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          <div className="mt-auto pt-3">
-            <Btn disabled={isWorking} onClick={() => onStart(token.id)} tone="primary">
-              Start consultation · N
-            </Btn>
-          </div>
-        </div>
-
-        {/* BACK — briefing */}
-        <div className="absolute inset-0 flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E2E8F0] bg-white/95 px-5 py-4 shadow-[0_18px_34px_-24px_rgba(15,23,42,0.25)] [backface-visibility:hidden] [transform:rotateY(180deg)]">
-          <div className="flex items-center justify-between">
-            <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#6A7283]">
-              Briefing
-            </p>
-            <button
-              aria-label="Flip back"
-              className="rounded-full p-1 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
-              onClick={() => setFlipped(false)}
-              type="button"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="mt-1.5 flex items-baseline gap-3">
-            <span className="text-[22px] font-extrabold leading-none tracking-[-0.03em] text-[#0B1840] tabular-nums">
-              #{token.token_number}
-            </span>
-            <span className="truncate text-sm font-bold text-[#1A2550]">
-              {token.patients?.name ?? "Patient"}
-            </span>
-          </div>
-
-          <NextBriefBody
-            token={token}
-            brief={brief}
-            loading={briefLoading}
+        <div
+          className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#C7D2FE] bg-[linear-gradient(145deg,#EEF2FF_0%,#E0E7FF_55%,#F5F7FF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(79,70,229,0.35)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(79,70,229,0.55)] [backface-visibility:hidden]"
+          onPointerLeave={onPointerLeave}
+          onPointerMove={onPointerMove}
+          ref={frontRef}
+        >
+          {/* Cursor spotlight — diffuse ambient glow that follows the pointer */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute left-0 top-0 z-0 h-[260px] w-[260px] opacity-0 transition-opacity duration-300 ease-out"
+            ref={orbRef}
+            style={{
+              background:
+                "radial-gradient(circle, rgba(99,102,241,0.18) 0%, rgba(99,102,241,0.07) 35%, rgba(99,102,241,0) 70%)",
+              willChange: "transform, opacity"
+            }}
           />
 
-          {/* Terminal actions */}
-          <div className="mt-auto flex flex-wrap gap-1.5 pt-3">
-            <SendTextAction
-              token={token}
-              clinicName={clinicName}
-              prominent={token.proximity_status === "unknown"}
-            />
-            {token.patients?.phone ? (
-              <a
-                className="inline-flex items-center gap-1.5 rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] text-[#1A2550] hover:border-[#CBD5E1]"
-                href={`tel:${token.patients.phone}`}
+          <div className="relative z-10 flex h-full min-h-0 flex-col">
+            <div className="shrink-0">
+              {/* Header — kicker on left, waited-time pill on right (urgency signal) */}
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
+                  Next up
+                </p>
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] ring-1",
+                    waited >= 30
+                      ? "qcare-breathe bg-[#FEE2E2] text-[#B91C1C] ring-[#FECACA]"
+                      : waited >= 15
+                        ? "bg-[#FFFBEB] text-[#B45309] ring-[#FDE68A]"
+                        : "bg-white/80 text-[#4F46E5] ring-[#C7D2FE]"
+                  )}
+                  title={`Checked in ${formatDur(waited)} ago`}
+                >
+                  <Clock className="h-3 w-3" />
+                  <span className="opacity-70">waited</span>
+                  <span className="tabular-nums">{formatDur(waited)}</span>
+                </span>
+              </div>
+
+              {/* Name as hero — token # + gender/age inline, animated underline on hover */}
+              <button
+                aria-expanded={flipped}
+                className="group/name relative mt-2 flex items-baseline gap-2 text-left"
+                onClick={() => setFlipped(true)}
+                title="Show briefing"
+                type="button"
               >
-                <Phone className="h-3 w-3" />
-                Call
-              </a>
-            ) : null}
-            <Btn
-              onClick={() => patientId && onOpenProfile(patientId)}
-              tone="ghost"
+                <span
+                  className="relative min-w-0 flex-1 truncate text-[22px] font-extrabold leading-[1.1] tracking-[-0.02em] text-[#0B1840] transition-[letter-spacing] duration-300 ease-out group-hover/name:tracking-[-0.025em]"
+                  title={token.patients?.name ?? undefined}
+                >
+                  {formatPatientName(token.patients?.name)}
+                  {patientMeta(token) ? (
+                    <span className="ml-2 text-[12px] font-semibold tracking-normal text-[#6A7283]">
+                      {patientMeta(token)}
+                    </span>
+                  ) : null}
+                  <span
+                    aria-hidden
+                    className="absolute -bottom-0.5 left-0 h-[2px] w-0 rounded-full bg-[linear-gradient(90deg,#6366F1_0%,#A5B4FC_100%)] transition-[width] duration-400 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/name:w-full"
+                  />
+                </span>
+                <span
+                  className={cn(
+                    "shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-bold uppercase tracking-[0.14em] tabular-nums ring-1 transition-colors duration-300",
+                    tokenNeedsCall(token)
+                      ? "bg-[#FEE2E2] text-[#B91C1C] ring-[#FECACA]"
+                      : "bg-white/70 text-[#4F46E5] ring-[#C7D2FE] group-hover/name:bg-[#EEF2FF] group-hover/name:ring-[#A5B4FC]"
+                  )}
+                  title={
+                    tokenNeedsCall(token)
+                      ? "Check-in SMS didn't deliver — call them"
+                      : undefined
+                  }
+                >
+                  #{token.token_number}
+                </span>
+                <ChevronRight
+                  aria-hidden
+                  className="h-4 w-4 shrink-0 self-center text-[#A5B4FC] transition-all duration-300 ease-out group-hover/name:translate-x-1 group-hover/name:text-[#4F46E5]"
+                />
+              </button>
+
+              {/* Readiness indicators — right under the name for glanceable go/no-go.
+                  Each unresolved dot is itself the fix-it affordance. */}
+              <PreflightRow
+                onFixProximity={() => onOpenProximity(token)}
+                onFixVitals={() => onOpenVitals(token)}
+                onInsurance={() =>
+                  token.patients?.insurance_provider
+                    ? onOpenInsurance(token)
+                    : onCollectPayment(token)
+                }
+                token={token}
+              />
+
+              <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                {patientChips(token, new Date())}
+              </div>
+
+              <ContactLine hideMeta token={token} tone="indigo" />
+            </div>
+
+            <div
+              className={cn(
+                "min-h-0 flex-1",
+                complaint ? "mt-3 overflow-hidden" : "mt-2"
+              )}
             >
-              Full profile
-            </Btn>
+              {complaint ? (
+                <div
+                  className={cn(
+                    "rounded-2xl border px-4 py-3 backdrop-blur-sm",
+                    complaintIsRedFlag
+                      ? "border-[#FECACA] bg-[#FFF5F5]/90 shadow-[0_10px_24px_-14px_rgba(185,28,28,0.35)]"
+                      : "border-white/90 bg-white/85 shadow-[0_10px_24px_-16px_rgba(79,70,229,0.28)]"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5">
+                    {complaintIsRedFlag ? (
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[#B91C1C]" />
+                    ) : null}
+                    <p
+                      className={cn(
+                        "text-[10px] font-bold uppercase tracking-[0.2em]",
+                        complaintIsRedFlag ? "text-[#B91C1C]" : "text-[#4F46E5]"
+                      )}
+                    >
+                      Here for
+                    </p>
+                  </div>
+                  <p
+                    className={cn(
+                      "mt-1 line-clamp-2 text-[15px] font-extrabold leading-snug tracking-[-0.01em]",
+                      complaintIsRedFlag ? "text-[#991B1B]" : "text-[#0B1840]"
+                    )}
+                  >
+                    {complaint}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+
+            {visibleUpcoming.length > 0 ? (
+              <div className="mt-auto shrink-0 rounded-2xl border border-white/80 bg-white/70 p-2.5 backdrop-blur-sm">
+                <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
+                  Then
+                </p>
+                <div className="mt-1 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5 text-[11px] font-semibold text-[#1A2550]">
+                  {visibleUpcoming.map((u) => (
+                    <Fragment key={u.id}>
+                      <span className="tabular-nums text-[#4F46E5]">
+                        #{u.token_number}
+                      </span>
+                      <span className="truncate">
+                        {u.patients?.name ?? "Patient"}
+                      </span>
+                      <span className="text-[#8B97AD]">
+                        {formatDur(minutesSince(u.checked_in_at))}
+                      </span>
+                    </Fragment>
+                  ))}
+                  {moreCount > 0 ? (
+                    <>
+                      <span aria-hidden className="text-[#A5B4FC]">+</span>
+                      <span className="italic text-[#6A7283]">
+                        {moreCount} more {moreCount === 1 ? "patient" : "patients"}
+                      </span>
+                      <span aria-hidden />
+                    </>
+                  ) : null}
+                </div>
+              </div>
+            ) : moreCount > 0 ? (
+              <p className="mt-auto shrink-0 text-[11px] font-semibold italic text-[#6A7283]">
+                + {moreCount} more {moreCount === 1 ? "patient" : "patients"} waiting
+              </p>
+            ) : null}
+
+            <div className="mt-3 shrink-0">
+              <button
+                className="group/cta relative inline-flex w-full items-center justify-center gap-1.5 overflow-hidden rounded-full bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_55%,#4338CA_100%)] px-5 py-2.5 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_24px_-10px_rgba(79,70,229,0.7),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:shadow-[0_16px_32px_-10px_rgba(79,70,229,0.85),inset_0_1px_0_rgba(255,255,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+                disabled={isWorking}
+                onClick={() => onStart(token.id)}
+                type="button"
+              >
+                {/* Shimmer sweep — ultra-premium sheen on hover */}
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.35)_50%,transparent_100%)] transition-transform duration-700 ease-out group-hover/cta:translate-x-[300%]"
+                />
+                <span className="relative z-10">Start consultation</span>
+                <ChevronRight
+                  aria-hidden
+                  className="relative z-10 h-3.5 w-3.5 transition-transform duration-200 ease-out group-hover/cta:translate-x-1"
+                />
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* BACK — dossier. Contents mount on flip, so the cascading reveal
+            re-fires each time the card is flipped open. */}
+        <div className="absolute inset-0 flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E6E8EF] bg-[linear-gradient(180deg,#FDFDFE_0%,#F8F9FC_100%)] px-5 py-4 shadow-[0_18px_34px_-24px_rgba(15,23,42,0.25)] [backface-visibility:hidden] [transform:rotateY(180deg)]">
+          {/* subtle paper grain */}
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 opacity-[0.35]"
+            style={{
+              backgroundImage:
+                "linear-gradient(to right, rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.06) 1px, transparent 1px)",
+              backgroundSize: "22px 22px"
+            }}
+          />
+          <div className="relative flex h-full flex-col">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#6A7283]">
+                Dossier
+              </p>
+              <button
+                aria-label="Flip back"
+                className="rounded-full p-1 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
+                onClick={() => setFlipped(false)}
+                type="button"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {flipped ? (
+              <NextDossierBody
+                brief={brief}
+                clinicName={clinicName}
+                key={`dossier-${token.id}`}
+                loading={briefLoading}
+                token={token}
+              />
+            ) : null}
+          </div>
+        </div>
+      </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Back-face dossier. Shape-shifts between "returning" and "new patient"
+ * layouts. Each section is a cascading reveal keyed off the flip so items
+ * land staggered.
+ */
+function NextDossierBody({
+  token,
+  clinicName,
+  brief,
+  loading
+}: {
+  token: QueueItem;
+  clinicName: string;
+  brief: PatientBrief | null;
+  loading: boolean;
+}) {
+  const summary = buildOpener(token, brief);
+  const isReturning = (brief?.totalVisits ?? 0) > 1;
+  const lastVisit = brief?.lastToken ?? null;
+  const unpaid = brief?.unpaidPriorVisits ?? 0;
+  const familyToday = brief?.familyToday ?? [];
+  const allergies = brief?.patient.allergies ?? [];
+  const language = brief?.patient.language_preference ?? null;
+  const phone = token.patients?.phone ?? null;
+  const firstName =
+    (token.patients?.name ?? "there").split(/\s+/)[0] ?? "there";
+  let step = 0;
+  const stepStyle = () =>
+    ({ ["--i" as string]: step++ } as React.CSSProperties);
+
+  return (
+    <div className="mt-2 flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+      {/* AI summary — one-line whisper */}
+      {summary ? (
+        <div
+          className="qcare-list-item-in flex items-start gap-2 rounded-2xl border border-[#E0E7FF] bg-[linear-gradient(135deg,#EEF2FF_0%,#F8FAFF_100%)] px-3 py-2 shadow-[0_8px_20px_-16px_rgba(79,70,229,0.35)]"
+          style={stepStyle()}
+        >
+          <Sparkles className="mt-[2px] h-3.5 w-3.5 shrink-0 text-[#6366F1]" />
+          <p className="text-[12.5px] font-semibold leading-snug text-[#1A2550]">
+            {summary}
+          </p>
+        </div>
+      ) : null}
+
+      {/* Returning: last visit */}
+      {isReturning && lastVisit ? (
+        <div
+          className="qcare-list-item-in rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2.5"
+          style={stepStyle()}
+        >
+          <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
+            Last visit
+          </p>
+          <p className="mt-0.5 text-[12.5px] font-semibold text-[#1A2550]">
+            {new Intl.DateTimeFormat("en-IN", {
+              day: "numeric",
+              month: "short"
+            }).format(new Date(lastVisit.date))}
+            {lastVisit.doctor_name ? (
+              <span className="text-[#8B97AD]"> · {lastVisit.doctor_name}</span>
+            ) : null}
+          </p>
+          {lastVisit.raw_complaint ? (
+            <p className="mt-0.5 line-clamp-2 text-[11.5px] italic text-[#5C667D]">
+              “{lastVisit.raw_complaint}”
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* Returning: unfinished business (unpaid) */}
+      {isReturning && unpaid > 0 ? (
+        <div
+          className="qcare-list-item-in flex items-start gap-2 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-3 py-2.5"
+          style={stepStyle()}
+        >
+          <AlertTriangle className="mt-[2px] h-3.5 w-3.5 shrink-0 text-[#B45309]" />
+          <div className="min-w-0 flex-1">
+            <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#B45309]">
+              Unfinished
+            </p>
+            <p className="mt-0.5 text-[12.5px] font-semibold text-[#92400E]">
+              {unpaid} prior {unpaid === 1 ? "visit" : "visits"} with unpaid balance
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {/* New: intake checklist */}
+      {!isReturning && brief ? (
+        <div
+          className="qcare-list-item-in rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2.5"
+          style={stepStyle()}
+        >
+          <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
+            Intake checklist
+          </p>
+          <ul className="mt-1 space-y-0.5 text-[12px] font-semibold text-[#1A2550]">
+            <li className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#CBD5E1]" />
+              Confirm allergies & current medication
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#CBD5E1]" />
+              Emergency contact
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#CBD5E1]" />
+              How did they hear about us?
+            </li>
+            <li className="flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-[#CBD5E1]" />
+              Preferred language for reports
+            </li>
+          </ul>
+        </div>
+      ) : null}
+
+      {/* Notes — allergies + language. Shown for both new and returning. */}
+      {(allergies.length > 0 || language) && brief ? (
+        <div
+          className="qcare-list-item-in rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2.5"
+          style={stepStyle()}
+        >
+          <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
+            Notes
+          </p>
+          <ul className="mt-1 space-y-1 text-[12px] font-semibold">
+            {allergies.length > 0 ? (
+              <li className="flex items-start gap-1.5 text-[#B91C1C]">
+                <AlertTriangle className="mt-[2px] h-3 w-3 shrink-0" />
+                Allergic to {allergies.slice(0, 3).join(", ")}
+                {allergies.length > 3 ? ", …" : ""}
+              </li>
+            ) : null}
+            {language && language.toLowerCase() !== "en" ? (
+              <li className="flex items-start gap-1.5 text-[#1A2550]">
+                <span className="mt-[5px] h-1.5 w-1.5 shrink-0 rounded-full bg-[#6366F1]" />
+                Prefers{" "}
+                {({
+                  hi: "Hindi",
+                  ta: "Tamil",
+                  te: "Telugu",
+                  kn: "Kannada",
+                  ml: "Malayalam"
+                } as Record<string, string>)[language.toLowerCase()] ?? language}
+              </li>
+            ) : null}
+          </ul>
+        </div>
+      ) : null}
+
+      {/* Family today */}
+      {familyToday.length > 0 ? (
+        <div
+          className="qcare-list-item-in rounded-2xl border border-[#E2E8F0] bg-white px-3 py-2.5"
+          style={stepStyle()}
+        >
+          <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
+            Family here today
+          </p>
+          <ul className="mt-1 space-y-0.5 text-[12px] font-semibold text-[#1A2550]">
+            {familyToday.slice(0, 3).map((f) => (
+              <li className="flex items-center gap-2" key={f.id}>
+                <span className="tabular-nums text-[#4F46E5]">#{f.token_number}</span>
+                <span className="truncate">{f.name}</span>
+                <span className="ml-auto text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8B97AD]">
+                  {f.status.replace(/_/g, " ")}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {loading && !brief ? (
+        <div className="space-y-1.5">
+          {[0, 1, 2].map((i) => (
+            <div
+              className="h-3 rounded bg-[#EEF2F7]"
+              key={i}
+              style={{
+                width: `${80 - i * 15}%`,
+                opacity: 1 - i * 0.25,
+                animation: "pulse 1.5s ease-in-out infinite"
+              }}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {/* Terminal actions — Text + Call only. No "Full profile" escape hatch. */}
+      <div
+        className="qcare-list-item-in mt-auto flex gap-1.5 pt-2"
+        style={stepStyle()}
+      >
+        {phone ? (
+          <>
+            <a
+              className="group/bc inline-flex flex-1 items-center justify-center gap-1.5 rounded-full border border-[#C7D2FE] bg-white px-3 py-2 text-[11px] font-bold uppercase tracking-[0.12em] text-[#4F46E5] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[#EEF2FF] hover:shadow-[0_8px_20px_-10px_rgba(99,102,241,0.55)]"
+              href={`sms:${phone}?body=${encodeURIComponent(
+                `Hi ${firstName}, this is ${clinicName} reception. Token #${token.token_number} will be called in a few minutes.`
+              )}`}
+            >
+              <MessageSquare className="h-4 w-4 transition-transform duration-300 group-hover/bc:-rotate-6 group-hover/bc:scale-[1.2]" />
+              Text
+            </a>
+            <a
+              className="group/bc inline-flex flex-1 items-center justify-center gap-1.5 rounded-full border border-[#C7D2FE] bg-white px-3 py-2 text-[11px] font-bold uppercase tracking-[0.12em] text-[#4F46E5] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[#EEF2FF] hover:shadow-[0_8px_20px_-10px_rgba(99,102,241,0.55)]"
+              href={`tel:${phone}`}
+            >
+              <Phone className="h-4 w-4 transition-transform duration-300 group-hover/bc:rotate-[-12deg] group-hover/bc:scale-[1.2]" />
+              Call
+            </a>
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -3057,82 +4148,384 @@ function SendTextAction({
 
 function NeedsYouCard({
   items,
+  overflowItems,
   isWorking,
   onDismiss
 }: {
   items: NeedsYouItem[];
+  overflowItems: NeedsYouItem[];
+  isWorking: boolean;
+  onDismiss: (id: string) => void;
+}) {
+  const [flipped, setFlipped] = useState(false);
+  const [isFlipping, setIsFlipping] = useState(false);
+  const frontRef = useRef<HTMLDivElement>(null);
+  const orbRef = useRef<HTMLDivElement>(null);
+  const flipMountedRef = useRef(false);
+
+  // When overflow drains to zero, pull the user back to the front automatically.
+  useEffect(() => {
+    if (overflowItems.length === 0 && flipped) setFlipped(false);
+  }, [overflowItems.length, flipped]);
+
+  // Paper-lift animation on each flip; skip initial mount.
+  useEffect(() => {
+    if (!flipMountedRef.current) {
+      flipMountedRef.current = true;
+      return;
+    }
+    setIsFlipping(true);
+    const t = window.setTimeout(() => setIsFlipping(false), 620);
+    return () => window.clearTimeout(t);
+  }, [flipped]);
+
+  // Esc to flip back
+  useEffect(() => {
+    if (!flipped) return;
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const inField =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (inField) return;
+      if (e.key === "Escape") setFlipped(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [flipped]);
+
+  // Cursor hologram — violet ambient glow
+  function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    const host = frontRef.current;
+    const orb = orbRef.current;
+    if (!host || !orb) return;
+    const rect = host.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    orb.style.transform = `translate3d(${x - 130}px, ${y - 130}px, 0)`;
+    orb.style.opacity = "1";
+  }
+  function onPointerLeave() {
+    if (orbRef.current) orbRef.current.style.opacity = "0";
+  }
+
+  return (
+    <div className="group h-full [perspective:1400px]">
+      <div
+        className={cn(
+          "h-full transition-transform duration-200 ease-out hover:-translate-y-[2px]",
+          isFlipping && "qcare-flip-lift"
+        )}
+      >
+        <div
+          className={cn(
+            "relative h-full [transform-style:preserve-3d] transition-transform duration-[520ms] will-change-transform [transition-timing-function:cubic-bezier(0.4,0,0.2,1)]",
+            flipped && "[transform:rotateY(180deg)]"
+          )}
+        >
+          {/* FRONT — top 3 */}
+          <div
+            className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E9D5FF] bg-[linear-gradient(145deg,#FAF5FF_0%,#F3E8FF_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(168,85,247,0.28)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(168,85,247,0.45)] [backface-visibility:hidden]"
+            onPointerLeave={onPointerLeave}
+            onPointerMove={onPointerMove}
+            ref={frontRef}
+          >
+            {/* Violet cursor spotlight */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute left-0 top-0 z-0 h-[260px] w-[260px] opacity-0 transition-opacity duration-300 ease-out"
+              ref={orbRef}
+              style={{
+                background:
+                  "radial-gradient(circle, rgba(168,85,247,0.18) 0%, rgba(168,85,247,0.07) 35%, rgba(168,85,247,0) 70%)",
+                willChange: "transform, opacity"
+              }}
+            />
+
+            <div className="relative z-10 flex h-full min-h-0 flex-col">
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <Sparkles className="h-3 w-3 text-[#7E22CE]" />
+                    <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#7E22CE]">
+                      Action center
+                    </p>
+                  </div>
+                  <span className="rounded-full bg-white/80 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#7E22CE] ring-1 ring-[#E9D5FF]">
+                    Top {items.length}
+                  </span>
+                </div>
+
+                {items.length === 0 ? (
+                  <div className="my-auto flex flex-col items-center gap-1.5 py-6 text-center">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#DCFCE7] text-[#047857]">
+                      <CheckCircle2 className="h-5 w-5" />
+                    </div>
+                    <p className="text-sm font-bold text-[#0B1840]">All quiet.</p>
+                    <p className="text-[11px] font-medium text-[#8B97AD]">
+                      Prāṇa is watching.
+                    </p>
+                  </div>
+                ) : (
+                  <ul className="mt-3 grid auto-rows-min gap-2 overflow-hidden">
+                    {items.map((item) => (
+                      <NeedsYouRow
+                        isWorking={isWorking}
+                        item={item}
+                        key={item.id}
+                        onDismiss={onDismiss}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {overflowItems.length > 0 ? (
+                <div className="mt-auto shrink-0 pt-3">
+                  <button
+                    aria-expanded={flipped}
+                    className="group/more flex w-full items-center justify-between rounded-full border border-[#E9D5FF] bg-white/80 px-4 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#7E22CE] transition-all duration-200 hover:-translate-y-[0.5px] hover:bg-[#FAF5FF] hover:shadow-[0_8px_20px_-10px_rgba(168,85,247,0.5)]"
+                    onClick={() => setFlipped(true)}
+                    title="Show the rest"
+                    type="button"
+                  >
+                    <span>
+                      {overflowItems.length} more{" "}
+                      {overflowItems.length === 1 ? "action" : "actions"}
+                    </span>
+                    <ChevronRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover/more:translate-x-0.5" />
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          {/* BACK — overflow dossier */}
+          <div className="absolute inset-0 flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E6E8EF] bg-[linear-gradient(180deg,#FDFDFE_0%,#F8F9FC_100%)] px-5 py-4 shadow-[0_18px_34px_-24px_rgba(15,23,42,0.25)] [backface-visibility:hidden] [transform:rotateY(180deg)]">
+            {/* subtle paper grain */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 opacity-[0.35]"
+              style={{
+                backgroundImage:
+                  "linear-gradient(to right, rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.06) 1px, transparent 1px)",
+                backgroundSize: "22px 22px"
+              }}
+            />
+            <div className="relative flex h-full min-h-0 flex-col">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="h-3 w-3 text-[#7E22CE]" />
+                  <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#7E22CE]">
+                    Also on your plate
+                  </p>
+                </div>
+                <button
+                  aria-label="Flip back"
+                  className="rounded-full p-1 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
+                  onClick={() => setFlipped(false)}
+                  type="button"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {flipped ? (
+                <ul
+                  className="mt-3 grid auto-rows-min gap-2 overflow-hidden"
+                  key={`overflow-${overflowItems.length}`}
+                >
+                  {overflowItems.map((item, i) => (
+                    <div
+                      className="qcare-list-item-in"
+                      key={item.id}
+                      style={{ ["--i" as string]: i } as React.CSSProperties}
+                    >
+                      <NeedsYouRow
+                        isWorking={isWorking}
+                        item={item}
+                        onDismiss={onDismiss}
+                      />
+                    </div>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NeedsYouRow({
+  item,
+  isWorking,
+  onDismiss
+}: {
+  item: NeedsYouItem;
   isWorking: boolean;
   onDismiss: (id: string) => void;
 }) {
   return (
-    <div className="flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E9D5FF] bg-[linear-gradient(145deg,#FAF5FF_0%,#F3E8FF_55%,#FFFFFF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(168,85,247,0.28)] backdrop-blur-xl">
-      <div className="flex items-center justify-between">
-        <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#7E22CE]">
-          Needs you
-        </p>
-        <span className="rounded-full bg-[linear-gradient(135deg,#F3E8FF_0%,#E9D5FF_100%)] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#7E22CE]">
-          {items.length}
-        </span>
-      </div>
-      {items.length === 0 ? (
-        <div className="mt-5 flex flex-col items-center gap-1.5 py-6 text-center">
-          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#DCFCE7] text-[#047857]">
-            <CheckCircle2 className="h-5 w-5" />
-          </div>
-          <p className="text-sm font-bold text-[#0B1840]">All quiet.</p>
-          <p className="text-[11px] font-medium text-[#8B97AD]">Co-pilot is watching.</p>
-        </div>
-      ) : (
-        <ul className="mt-3 grid min-h-0 flex-1 auto-rows-min gap-2 overflow-y-auto pr-1">
-          {items.map((item) => (
-            <li
-              className={cn(
-                "rounded-2xl border px-3 py-2.5",
-                item.severity === "red" && "border-[#FECACA] bg-[#FFF1F2]",
-                item.severity === "amber" && "border-[#FDE68A] bg-[#FFFBEB]",
-                item.severity === "info" && "border-[#DBEAFE] bg-[#F3F7FF]"
-              )}
-              key={item.id}
-            >
-              <p
-                className={cn(
-                  "text-[13px] font-bold leading-snug",
-                  item.severity === "red" && "text-[#B91C1C]",
-                  item.severity === "amber" && "text-[#B45309]",
-                  item.severity === "info" && "text-[#1D4ED8]"
-                )}
-              >
-                {item.title}
-              </p>
-              <p className="mt-0.5 text-[11px] font-medium text-[#5C667D]">{item.detail}</p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {item.primary ? (
-                  <Btn
-                    disabled={isWorking}
-                    onClick={() => void item.primary?.run()}
-                    tone="primary"
-                  >
-                    {item.primary.label}
-                  </Btn>
-                ) : null}
-                {item.secondary ? (
-                  <Btn
-                    disabled={isWorking}
-                    onClick={() => void item.secondary?.run()}
-                    tone="outline"
-                  >
-                    {item.secondary.label}
-                  </Btn>
-                ) : null}
-                <Btn onClick={() => onDismiss(item.id)} tone="ghost">
-                  Dismiss
-                </Btn>
-              </div>
-            </li>
-          ))}
-        </ul>
+    <li
+      className={cn(
+        "rounded-2xl border px-3 py-2.5",
+        item.severity === "red" && "border-[#FECACA] bg-[#FFF1F2]",
+        item.severity === "amber" && "border-[#FDE68A] bg-[#FFFBEB]",
+        item.severity === "info" && "border-[#DBEAFE] bg-[#F3F7FF]"
       )}
-    </div>
+    >
+      <p
+        className={cn(
+          "text-[13px] font-bold leading-snug",
+          item.severity === "red" && "text-[#B91C1C]",
+          item.severity === "amber" && "text-[#B45309]",
+          item.severity === "info" && "text-[#1D4ED8]"
+        )}
+      >
+        {item.title}
+      </p>
+      <p className="mt-0.5 text-[11px] font-medium text-[#5C667D]">{item.detail}</p>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        {item.primary ? (
+          <ActionCtaPrimary
+            disabled={isWorking}
+            onClick={() => void item.primary?.run()}
+            severity={item.severity}
+          >
+            {item.primary.label}
+          </ActionCtaPrimary>
+        ) : null}
+        {item.secondary ? (
+          <ActionCtaSecondary
+            disabled={isWorking}
+            onClick={() => void item.secondary?.run()}
+            severity={item.severity}
+          >
+            {item.secondary.label}
+          </ActionCtaSecondary>
+        ) : null}
+        <button
+          className="ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-[#8B97AD] transition-colors duration-200 hover:bg-white/60 hover:text-[#475569]"
+          onClick={() => onDismiss(item.id)}
+          title="Dismiss"
+          type="button"
+        >
+          <X className="h-3 w-3" />
+          Dismiss
+        </button>
+      </div>
+    </li>
+  );
+}
+
+/**
+ * Primary CTA inside an Action Center row. Premium gradient pill that mirrors
+ * the "Start consultation" button on NextCard — shimmer sweep, inset top
+ * highlight, deeper shadow on hover, chevron nudge. The gradient and shadow
+ * recolor per severity so urgency reads at a glance.
+ */
+function ActionCtaPrimary({
+  children,
+  onClick,
+  disabled,
+  severity
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  severity: "red" | "amber" | "info";
+}) {
+  const tone = {
+    red: {
+      bg: "bg-[linear-gradient(135deg,#EF4444_0%,#DC2626_55%,#B91C1C_100%)]",
+      shadowRest:
+        "shadow-[0_10px_24px_-10px_rgba(220,38,38,0.7),inset_0_1px_0_rgba(255,255,255,0.22)]",
+      shadowHover:
+        "hover:shadow-[0_16px_32px_-10px_rgba(220,38,38,0.85),inset_0_1px_0_rgba(255,255,255,0.28)]"
+    },
+    amber: {
+      bg: "bg-[linear-gradient(135deg,#F59E0B_0%,#D97706_55%,#B45309_100%)]",
+      shadowRest:
+        "shadow-[0_10px_24px_-10px_rgba(217,119,6,0.7),inset_0_1px_0_rgba(255,255,255,0.22)]",
+      shadowHover:
+        "hover:shadow-[0_16px_32px_-10px_rgba(217,119,6,0.85),inset_0_1px_0_rgba(255,255,255,0.28)]"
+    },
+    info: {
+      bg: "bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_55%,#4338CA_100%)]",
+      shadowRest:
+        "shadow-[0_10px_24px_-10px_rgba(79,70,229,0.7),inset_0_1px_0_rgba(255,255,255,0.22)]",
+      shadowHover:
+        "hover:shadow-[0_16px_32px_-10px_rgba(79,70,229,0.85),inset_0_1px_0_rgba(255,255,255,0.28)]"
+    }
+  }[severity];
+
+  return (
+    <button
+      className={cn(
+        "group/cta relative inline-flex items-center justify-center gap-1.5 overflow-hidden rounded-full px-3.5 py-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-white transition-all duration-200 ease-out hover:-translate-y-[1px] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0",
+        tone.bg,
+        tone.shadowRest,
+        tone.shadowHover
+      )}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.35)_50%,transparent_100%)] transition-transform duration-700 ease-out group-hover/cta:translate-x-[300%]"
+      />
+      <span className="relative z-10">{children}</span>
+      <ChevronRight
+        aria-hidden
+        className="relative z-10 h-3 w-3 transition-transform duration-200 ease-out group-hover/cta:translate-x-0.5"
+      />
+    </button>
+  );
+}
+
+/**
+ * Secondary CTA — bordered glass pill with tone-tinted hover shadow. Calm
+ * sibling to the primary so the hierarchy reads at a glance.
+ */
+function ActionCtaSecondary({
+  children,
+  onClick,
+  disabled,
+  severity
+}: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  disabled?: boolean;
+  severity: "red" | "amber" | "info";
+}) {
+  const tone = {
+    red: "border-[#FECACA] text-[#B91C1C] hover:bg-white hover:border-[#FCA5A5] hover:shadow-[0_10px_20px_-10px_rgba(220,38,38,0.55)]",
+    amber:
+      "border-[#FDE68A] text-[#B45309] hover:bg-white hover:border-[#FCD34D] hover:shadow-[0_10px_20px_-10px_rgba(217,119,6,0.55)]",
+    info: "border-[#C7D2FE] text-[#4F46E5] hover:bg-white hover:border-[#A5B4FC] hover:shadow-[0_10px_20px_-10px_rgba(79,70,229,0.55)]"
+  }[severity];
+
+  return (
+    <button
+      className={cn(
+        "group/sec inline-flex items-center gap-1.5 rounded-full border bg-white/80 px-3.5 py-1.5 text-[11px] font-bold uppercase tracking-[0.14em] transition-all duration-200 ease-out hover:-translate-y-[1px] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0",
+        tone
+      )}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      <span>{children}</span>
+      <ChevronRight
+        aria-hidden
+        className="h-3 w-3 transition-transform duration-200 ease-out group-hover/sec:translate-x-0.5"
+      />
+    </button>
   );
 }
 
@@ -3354,46 +4747,141 @@ function DurationPicker({
 
 /* ---------- Next-up preflight row (vitals · insurance · proximity) ---------- */
 
-function PreflightRow({ token }: { token: QueueItem }) {
+function PreflightRow({
+  token,
+  onFixVitals,
+  onInsurance,
+  onFixProximity
+}: {
+  token: QueueItem;
+  onFixVitals?: () => void;
+  /** Fires regardless of insured/self-pay — parent routes to the right dialog. */
+  onInsurance?: () => void;
+  onFixProximity?: () => void;
+}) {
   const vitalsDone = Boolean(token.vitals_taken_at);
   const insurance = token.patients?.insurance_provider ?? null;
   const proximity = (token.proximity_status ?? "unknown") as ProximityStatus;
 
-  // Vitals — green if done, amber if pending
   const vitalsClass = vitalsDone ? "text-[#047857]" : "text-[#B45309]";
   const vitalsDot = vitalsDone ? "bg-[#10B981]" : "bg-[#F59E0B]";
   const vitalsText = vitalsDone ? "Vitals done" : "Vitals pending";
+  const vitalsRing = vitalsDone ? "hover:ring-[#BBF7D0]" : "hover:ring-[#FDE68A]";
 
-  // Insurance — blue if on file, muted if self-pay
-  const insuranceClass = insurance ? "text-[#1D4ED8]" : "text-[#64748B]";
-  const insuranceDot = insurance ? "bg-[#3B82F6]" : "bg-[#94A3B8]";
+  // Self-pay gets its own indigo tone so it reads as "distinct category" rather
+  // than "missing/broken" grey. Insurance stays blue.
+  const insuranceClass = insurance ? "text-[#1D4ED8]" : "text-[#4F46E5]";
+  const insuranceDot = insurance ? "bg-[#3B82F6]" : "bg-[#6366F1]";
   const insuranceText = insurance ?? "Self-pay";
+  const insuranceRing = insurance ? "hover:ring-[#BFDBFE]" : "hover:ring-[#C7D2FE]";
 
-  // Proximity
   const proxMap: Record<
     ProximityStatus,
-    { text: string; cls: string; dot: string }
+    { text: string; cls: string; dot: string; ring: string }
   > = {
-    in_clinic: { text: "In clinic", cls: "text-[#047857]", dot: "bg-[#10B981]" },
-    nearby: { text: "Nearby", cls: "text-[#B45309]", dot: "bg-[#F59E0B]" },
-    unknown: { text: "Not confirmed", cls: "text-[#64748B]", dot: "bg-[#94A3B8]" }
+    in_clinic: {
+      text: "In clinic",
+      cls: "text-[#047857]",
+      dot: "bg-[#10B981]",
+      ring: "hover:ring-[#BBF7D0]"
+    },
+    nearby: {
+      text: "Nearby",
+      cls: "text-[#B45309]",
+      dot: "bg-[#F59E0B]",
+      ring: "hover:ring-[#FDE68A]"
+    },
+    unknown: {
+      text: "Not confirmed",
+      cls: "text-[#64748B]",
+      dot: "bg-[#94A3B8]",
+      ring: "hover:ring-[#CBD5E1]"
+    }
   };
   const prox = proxMap[proximity];
 
+  // Every dot is tappable — resolved states open a "view / reconfirm" sheet,
+  // unresolved states open a "fix it" sheet. The user always sees an invite.
+  const vitalsActionable = Boolean(onFixVitals);
+  const insuranceActionable = Boolean(onInsurance);
+  const proxActionable = Boolean(onFixProximity);
+
+  const base =
+    "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 transition-all duration-200";
+  const actionRing =
+    "hover:-translate-y-[0.5px] hover:ring-1 hover:brightness-[1.03] focus-visible:outline-none focus-visible:ring-2";
+
+  function Item({
+    actionable,
+    onFix,
+    dotCls,
+    labelCls,
+    ringCls,
+    children,
+    title
+  }: {
+    actionable: boolean;
+    onFix?: () => void;
+    dotCls: string;
+    labelCls: string;
+    ringCls: string;
+    children: React.ReactNode;
+    title?: string;
+  }) {
+    if (!actionable) {
+      return (
+        <span className={cn(base, labelCls)}>
+          <span className={cn("h-1.5 w-1.5 rounded-full", dotCls)} />
+          {children}
+        </span>
+      );
+    }
+    return (
+      <button
+        className={cn("group/pf", base, actionRing, labelCls, ringCls)}
+        onClick={onFix}
+        title={title}
+        type="button"
+      >
+        <span className={cn("h-1.5 w-1.5 rounded-full", dotCls)} />
+        <span>{children}</span>
+        <ChevronRight className="h-3 w-3 opacity-60 transition-all duration-200 group-hover/pf:translate-x-0.5 group-hover/pf:opacity-100" />
+      </button>
+    );
+  }
+
   return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-semibold">
-      <span className={cn("inline-flex items-center gap-1.5", vitalsClass)}>
-        <span className={cn("h-1.5 w-1.5 rounded-full", vitalsDot)} />
+    <div className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] font-semibold">
+      <Item
+        actionable={vitalsActionable}
+        dotCls={vitalsDot}
+        labelCls={vitalsClass}
+        onFix={onFixVitals}
+        ringCls={vitalsRing}
+        title={vitalsDone ? "View vitals" : "Record vitals"}
+      >
         {vitalsText}
-      </span>
-      <span className={cn("inline-flex items-center gap-1.5", insuranceClass)}>
-        <span className={cn("h-1.5 w-1.5 rounded-full", insuranceDot)} />
+      </Item>
+      <Item
+        actionable={insuranceActionable}
+        dotCls={insuranceDot}
+        labelCls={insuranceClass}
+        onFix={onInsurance}
+        ringCls={insuranceRing}
+        title={insurance ? "View coverage" : "Collect payment"}
+      >
         {insuranceText}
-      </span>
-      <span className={cn("inline-flex items-center gap-1.5", prox.cls)}>
-        <span className={cn("h-1.5 w-1.5 rounded-full", prox.dot)} />
+      </Item>
+      <Item
+        actionable={proxActionable}
+        dotCls={prox.dot}
+        labelCls={prox.cls}
+        onFix={onFixProximity}
+        ringCls={prox.ring}
+        title={proximity === "unknown" ? "Confirm arrival" : "Change status"}
+      >
         {prox.text}
-      </span>
+      </Item>
     </div>
   );
 }
@@ -3416,6 +4904,591 @@ const HOLD_REASONS: Array<{
 ];
 
 const HOLD_MINUTE_PRESETS = [5, 10, 15, 30, 60];
+
+/* ---------- Payment dialog (demo portal) ---------- */
+
+const PAYMENT_METHODS: Array<{
+  key: "upi" | "card" | "cash";
+  label: string;
+  sub: string;
+  icon: string;
+}> = [
+  { key: "upi", label: "UPI", sub: "GPay · PhonePe · Paytm", icon: "₹" },
+  { key: "card", label: "Card", sub: "Credit or debit", icon: "▢" },
+  { key: "cash", label: "Cash", sub: "Pay at counter", icon: "₹" }
+];
+
+const CONSULTATION_FEE = 500;
+
+function PaymentDialog({
+  token,
+  onClose
+}: {
+  token: QueueItem;
+  onClose: () => void;
+}) {
+  const [method, setMethod] = useState<"upi" | "card" | "cash" | null>(null);
+  const [phase, setPhase] = useState<"pick" | "processing" | "done">("pick");
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && phase !== "processing") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, phase]);
+
+  function start(m: "upi" | "card" | "cash") {
+    setMethod(m);
+    setPhase("processing");
+    window.setTimeout(() => setPhase("done"), 1400);
+  }
+
+  const patientName = token.patients?.name ?? "Patient";
+  const methodLabel = PAYMENT_METHODS.find((m) => m.key === method)?.label ?? "";
+
+  return (
+    <ModalShell accent="emerald" maxWidth="max-w-md" onClose={onClose}>
+      <ModalHeader
+        kicker="Collect payment"
+        kickerColor="#047857"
+        onClose={onClose}
+        subtitle={`${patientName} · #${token.token_number}`}
+        title={
+          <span className="flex items-baseline gap-1.5">
+            <span className="text-[#047857]">₹</span>
+            <span className="tabular-nums">{CONSULTATION_FEE}</span>
+            <span className="ml-1 text-base font-semibold text-[#8B97AD]">
+              consultation
+            </span>
+          </span>
+        }
+      />
+
+      {phase === "pick" ? (
+        <div className="mt-5 space-y-2">
+          {PAYMENT_METHODS.map((m, i) => (
+            <button
+              className="qcare-list-item-in group flex w-full items-center gap-3 rounded-2xl border border-[#E2E8F0] bg-white/80 px-4 py-3 text-left transition-all duration-200 hover:-translate-y-[1px] hover:border-[#86EFAC] hover:bg-[#F0FDF4] hover:shadow-[0_10px_24px_-14px_rgba(16,185,129,0.5)]"
+              key={m.key}
+              onClick={() => start(m.key)}
+              style={{ ["--i" as string]: i } as React.CSSProperties}
+              type="button"
+            >
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(135deg,#DCFCE7_0%,#F0FDF4_100%)] text-xl font-extrabold text-[#047857] transition-transform duration-200 group-hover:scale-110">
+                {m.icon}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[14px] font-extrabold text-[#0B1840]">
+                  {m.label}
+                </p>
+                <p className="text-[11px] font-semibold text-[#8B97AD]">
+                  {m.sub}
+                </p>
+              </div>
+              <ChevronRight className="h-4 w-4 text-[#94A3B8] transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-[#047857]" />
+            </button>
+          ))}
+          <p className="mt-3 text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-[#94A3B8]">
+            Demo · no real charge
+          </p>
+        </div>
+      ) : null}
+
+      {phase === "processing" ? (
+        <div className="mt-6 flex flex-col items-center gap-3 py-8">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[linear-gradient(135deg,#DCFCE7_0%,#BBF7D0_100%)]">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#10B981] border-t-transparent" />
+          </div>
+          <p className="text-[13px] font-bold text-[#0B1840]">
+            Processing {methodLabel}…
+          </p>
+          <p className="text-[11px] font-semibold text-[#8B97AD]">
+            Confirming with {methodLabel === "Cash" ? "counter" : "gateway"}
+          </p>
+        </div>
+      ) : null}
+
+      {phase === "done" ? (
+        <div className="mt-6 flex flex-col items-center gap-3 py-6">
+          <div className="qcare-complete-reveal absolute flex h-20 w-20 items-center justify-center rounded-full bg-[#10B981]/20" />
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_100%)] shadow-[0_12px_24px_-8px_rgba(16,185,129,0.55)]">
+            <CheckCircle2 className="h-7 w-7 text-white" />
+          </div>
+          <p className="text-[14px] font-extrabold text-[#0B1840]">
+            ₹{CONSULTATION_FEE} received
+          </p>
+          <p className="text-[11px] font-semibold text-[#8B97AD]">
+            via {methodLabel} · receipt sent over SMS
+          </p>
+          <button
+            className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_100%)] px-5 py-2 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_20px_-10px_rgba(16,185,129,0.7)] transition hover:-translate-y-[1px]"
+            onClick={onClose}
+            type="button"
+          >
+            Done
+          </button>
+        </div>
+      ) : null}
+    </ModalShell>
+  );
+}
+
+/* ---------- Vitals dialog (demo entry) ---------- */
+
+function VitalsDialog({
+  token,
+  onClose
+}: {
+  token: QueueItem;
+  onClose: () => void;
+}) {
+  const [bpSys, setBpSys] = useState("");
+  const [bpDia, setBpDia] = useState("");
+  const [pulse, setPulse] = useState("");
+  const [temp, setTemp] = useState("");
+  const [spo2, setSpo2] = useState("");
+  const [phase, setPhase] = useState<"entry" | "saving" | "done">("entry");
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && phase !== "saving") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, phase]);
+
+  const canSave =
+    bpSys.trim().length >= 2 &&
+    bpDia.trim().length >= 2 &&
+    pulse.trim().length >= 2;
+
+  function save() {
+    setPhase("saving");
+    window.setTimeout(() => setPhase("done"), 1200);
+  }
+
+  const patientName = token.patients?.name ?? "Patient";
+
+  return (
+    <ModalShell accent="amber" maxWidth="max-w-md" onClose={onClose}>
+      <ModalHeader
+        kicker="Record vitals"
+        kickerColor="#B45309"
+        onClose={onClose}
+        subtitle={`${patientName} · #${token.token_number}`}
+        title="Vitals"
+      />
+
+      {phase === "entry" ? (
+        <div className="mt-5 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <VitalField
+              label="BP (sys)"
+              onChange={setBpSys}
+              placeholder="120"
+              suffix="mmHg"
+              value={bpSys}
+            />
+            <VitalField
+              label="BP (dia)"
+              onChange={setBpDia}
+              placeholder="80"
+              suffix="mmHg"
+              value={bpDia}
+            />
+            <VitalField
+              label="Pulse"
+              onChange={setPulse}
+              placeholder="72"
+              suffix="bpm"
+              value={pulse}
+            />
+            <VitalField
+              label="SpO₂"
+              onChange={setSpo2}
+              placeholder="98"
+              suffix="%"
+              value={spo2}
+            />
+            <VitalField
+              label="Temp"
+              onChange={setTemp}
+              placeholder="98.6"
+              suffix="°F"
+              value={temp}
+            />
+          </div>
+          <button
+            className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#F59E0B_0%,#D97706_55%,#B45309_100%)] px-5 py-2.5 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_24px_-10px_rgba(217,119,6,0.65)] transition hover:-translate-y-[1px] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={!canSave}
+            onClick={save}
+            type="button"
+          >
+            Save vitals
+            <ChevronRight className="h-3.5 w-3.5" />
+          </button>
+          <p className="text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-[#94A3B8]">
+            Demo · values not persisted
+          </p>
+        </div>
+      ) : null}
+
+      {phase === "saving" ? (
+        <div className="mt-6 flex flex-col items-center gap-3 py-8">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[linear-gradient(135deg,#FEF3C7_0%,#FDE68A_100%)]">
+            <div className="h-6 w-6 animate-spin rounded-full border-2 border-[#D97706] border-t-transparent" />
+          </div>
+          <p className="text-[13px] font-bold text-[#0B1840]">Saving vitals…</p>
+        </div>
+      ) : null}
+
+      {phase === "done" ? (
+        <div className="mt-6 flex flex-col items-center gap-3 py-6">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_100%)] shadow-[0_12px_24px_-8px_rgba(16,185,129,0.55)]">
+            <CheckCircle2 className="h-7 w-7 text-white" />
+          </div>
+          <p className="text-[14px] font-extrabold text-[#0B1840]">Vitals recorded</p>
+          <p className="text-[11px] font-semibold text-[#8B97AD]">
+            BP {bpSys}/{bpDia} · Pulse {pulse}
+          </p>
+          <button
+            className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_100%)] px-5 py-2 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_20px_-10px_rgba(16,185,129,0.7)] transition hover:-translate-y-[1px]"
+            onClick={onClose}
+            type="button"
+          >
+            Done
+          </button>
+        </div>
+      ) : null}
+    </ModalShell>
+  );
+}
+
+function VitalField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  suffix
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder: string;
+  suffix: string;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[10px] font-bold uppercase tracking-[0.16em] text-[#8B97AD]">
+        {label}
+      </span>
+      <div className="flex items-center rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 transition focus-within:border-[#FDE68A] focus-within:ring-2 focus-within:ring-[#FDE68A]/40">
+        <input
+          className="min-w-0 flex-1 border-0 bg-transparent p-0 text-[14px] font-extrabold tabular-nums text-[#0B1840] outline-none placeholder:font-medium placeholder:text-[#CBD5E1] focus:ring-0"
+          inputMode="decimal"
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          value={value}
+        />
+        <span className="ml-2 shrink-0 text-[10px] font-bold uppercase tracking-[0.14em] text-[#8B97AD]">
+          {suffix}
+        </span>
+      </div>
+    </label>
+  );
+}
+
+/* ---------- Proximity dialog (confirm arrival) ---------- */
+
+function ProximityDialog({
+  token,
+  clinicName,
+  onClose
+}: {
+  token: QueueItem;
+  clinicName: string;
+  onClose: () => void;
+}) {
+  const [phase, setPhase] = useState<"pick" | "done">("pick");
+  const [picked, setPicked] = useState<"sms" | "in_clinic" | "nearby" | null>(
+    null
+  );
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const phone = token.patients?.phone ?? null;
+  const firstName =
+    (token.patients?.name ?? "there").split(/\s+/)[0] ?? "there";
+  const smsBody = `Hi ${firstName}, this is ${clinicName} reception. Token #${token.token_number} is coming up next — please let us know if you're on your way.`;
+
+  function pick(kind: "sms" | "in_clinic" | "nearby") {
+    setPicked(kind);
+    if (kind === "sms" && phone) {
+      window.location.href = `sms:${phone}?body=${encodeURIComponent(smsBody)}`;
+    }
+    setPhase("done");
+  }
+
+  const options: Array<{
+    key: "sms" | "in_clinic" | "nearby";
+    label: string;
+    sub: string;
+    icon: React.ReactNode;
+    disabled?: boolean;
+  }> = [
+    {
+      key: "sms",
+      label: "Send arrival SMS",
+      sub: phone ?? "No phone on file",
+      icon: <MessageSquare className="h-4 w-4" />,
+      disabled: !phone
+    },
+    {
+      key: "in_clinic",
+      label: "Mark as in clinic",
+      sub: "Patient is here at the desk",
+      icon: <CheckCircle2 className="h-4 w-4" />
+    },
+    {
+      key: "nearby",
+      label: "Mark as nearby",
+      sub: "On their way — within 10 min",
+      icon: <Clock className="h-4 w-4" />
+    }
+  ];
+
+  return (
+    <ModalShell accent="sky" maxWidth="max-w-md" onClose={onClose}>
+      <ModalHeader
+        kicker="Confirm arrival"
+        kickerColor="#0369A1"
+        onClose={onClose}
+        subtitle={`${token.patients?.name ?? "Patient"} · #${token.token_number}`}
+        title="Where are they?"
+      />
+
+      {phase === "pick" ? (
+        <div className="mt-5 space-y-2">
+          {options.map((o, i) => (
+            <button
+              className="qcare-list-item-in group flex w-full items-center gap-3 rounded-2xl border border-[#E2E8F0] bg-white/80 px-4 py-3 text-left transition-all duration-200 hover:-translate-y-[1px] hover:border-[#7DD3FC] hover:bg-[#F0F9FF] hover:shadow-[0_10px_24px_-14px_rgba(14,165,233,0.5)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
+              disabled={o.disabled}
+              key={o.key}
+              onClick={() => pick(o.key)}
+              style={{ ["--i" as string]: i } as React.CSSProperties}
+              type="button"
+            >
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[linear-gradient(135deg,#DBEAFE_0%,#F0F9FF_100%)] text-[#0369A1] transition-transform duration-200 group-hover:scale-110">
+                {o.icon}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[14px] font-extrabold text-[#0B1840]">
+                  {o.label}
+                </p>
+                <p className="truncate text-[11px] font-semibold text-[#8B97AD]">
+                  {o.sub}
+                </p>
+              </div>
+              <ChevronRight className="h-4 w-4 text-[#94A3B8] transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-[#0369A1]" />
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {phase === "done" ? (
+        <div className="mt-6 flex flex-col items-center gap-3 py-6">
+          <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_100%)] shadow-[0_12px_24px_-8px_rgba(16,185,129,0.55)]">
+            <CheckCircle2 className="h-7 w-7 text-white" />
+          </div>
+          <p className="text-[14px] font-extrabold text-[#0B1840]">
+            {picked === "sms"
+              ? "SMS opened"
+              : picked === "in_clinic"
+                ? "Marked as in clinic"
+                : "Marked as nearby"}
+          </p>
+          <button
+            className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-[linear-gradient(135deg,#0EA5E9_0%,#0369A1_100%)] px-5 py-2 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_20px_-10px_rgba(14,165,233,0.7)] transition hover:-translate-y-[1px]"
+            onClick={onClose}
+            type="button"
+          >
+            Done
+          </button>
+        </div>
+      ) : null}
+    </ModalShell>
+  );
+}
+
+/* ---------- Insurance dialog (coverage breakdown) ---------- */
+
+/**
+ * Dummy per-provider coverage rules. In production this comes from the
+ * clinic's billing engine + provider policy database. For now: illustrative.
+ */
+function estimateCoverage(provider: string | null, fee: number) {
+  if (!provider) {
+    return {
+      coveragePct: 0,
+      covered: 0,
+      copay: fee,
+      authRequired: false,
+      policyNote: "Self-pay — full fee collected at reception."
+    };
+  }
+  const key = provider.toLowerCase();
+  const rules: Array<{ match: RegExp; pct: number; auth: boolean; note: string }> = [
+    { match: /star|health/, pct: 80, auth: false, note: "OPD covered up to ₹2,500/visit. No pre-auth for consultations." },
+    { match: /hdfc|ergo/, pct: 70, auth: false, note: "Cashless OPD at network clinics. Claim via app post-visit." },
+    { match: /icici|lombard/, pct: 75, auth: true, note: "Pre-auth required for amounts above ₹1,000." },
+    { match: /bajaj|allianz/, pct: 60, auth: false, note: "Co-payment applies. OPD annual cap ₹10,000." },
+    { match: /niva|bupa/, pct: 85, auth: false, note: "Premium plan — wellness visits fully covered once/year." },
+    { match: /tata|aig/, pct: 70, auth: true, note: "Pre-auth form mandatory for follow-ups." }
+  ];
+  const rule = rules.find((r) => r.match.test(key));
+  const pct = rule?.pct ?? 65;
+  const covered = Math.round((fee * pct) / 100);
+  return {
+    coveragePct: pct,
+    covered,
+    copay: fee - covered,
+    authRequired: rule?.auth ?? false,
+    policyNote:
+      rule?.note ?? "Standard OPD cover. Confirm with provider before claim submission."
+  };
+}
+
+function InsuranceDialog({
+  token,
+  onClose,
+  onCollectCopay
+}: {
+  token: QueueItem;
+  onClose: () => void;
+  onCollectCopay: () => void;
+}) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const fee = CONSULTATION_FEE;
+  const provider = token.patients?.insurance_provider ?? null;
+  const policy = (token.patients as { insurance_policy_number?: string | null } | null)
+    ?.insurance_policy_number ?? null;
+  const { coveragePct, covered, copay, authRequired, policyNote } =
+    estimateCoverage(provider, fee);
+
+  return (
+    <ModalShell accent="sky" maxWidth="max-w-md" onClose={onClose}>
+      <ModalHeader
+        kicker="Insurance coverage"
+        kickerColor="#1D4ED8"
+        onClose={onClose}
+        subtitle={`${token.patients?.name ?? "Patient"} · #${token.token_number}`}
+        title={provider ?? "Self-pay"}
+      />
+
+      {policy ? (
+        <p className="mt-2 font-mono text-[11px] text-[#8B97AD]">Policy {policy}</p>
+      ) : null}
+
+      {/* Breakdown */}
+      <div className="qcare-list-item-in mt-5 overflow-hidden rounded-2xl border border-[#DBEAFE] bg-[linear-gradient(145deg,#F0F9FF_0%,#DBEAFE_100%)] p-4" style={{ ["--i" as string]: 0 } as React.CSSProperties}>
+        <div className="flex items-baseline justify-between">
+          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#1D4ED8]">
+            Covered {coveragePct}%
+          </p>
+          <p className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
+            Fee ₹{fee}
+          </p>
+        </div>
+        <div className="mt-2 flex h-2 overflow-hidden rounded-full bg-white/70">
+          <div
+            className="h-full rounded-l-full bg-[linear-gradient(90deg,#3B82F6_0%,#1D4ED8_100%)] transition-[width] duration-700 ease-out"
+            style={{ width: `${coveragePct}%` }}
+          />
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#8B97AD]">
+              Insurer pays
+            </p>
+            <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#1D4ED8]">
+              ₹{covered}
+            </p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-[#B45309]">
+              Out-of-pocket
+            </p>
+            <p className="mt-0.5 text-[22px] font-extrabold tabular-nums text-[#B45309]">
+              ₹{copay}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Policy note */}
+      <div className="qcare-list-item-in mt-3 flex items-start gap-2 rounded-2xl border border-[#E2E8F0] bg-white px-3.5 py-2.5" style={{ ["--i" as string]: 1 } as React.CSSProperties}>
+        <Sparkles className="mt-[2px] h-3.5 w-3.5 shrink-0 text-[#A5B4FC]" />
+        <p className="text-[12px] font-semibold leading-snug text-[#1A2550]">
+          {policyNote}
+        </p>
+      </div>
+
+      {/* Auth warning */}
+      {authRequired ? (
+        <div className="qcare-list-item-in mt-2 flex items-start gap-2 rounded-2xl border border-[#FDE68A] bg-[#FFFBEB] px-3.5 py-2.5" style={{ ["--i" as string]: 2 } as React.CSSProperties}>
+          <AlertTriangle className="mt-[2px] h-3.5 w-3.5 shrink-0 text-[#B45309]" />
+          <p className="text-[12px] font-semibold leading-snug text-[#92400E]">
+            Pre-authorization required. Confirm with insurer before consultation.
+          </p>
+        </div>
+      ) : null}
+
+      <div className="qcare-list-item-in mt-5 flex gap-2" style={{ ["--i" as string]: 3 } as React.CSSProperties}>
+        {copay > 0 ? (
+          <button
+            className="group/cta relative flex-1 overflow-hidden rounded-full bg-[linear-gradient(135deg,#3B82F6_0%,#1D4ED8_55%,#1E40AF_100%)] px-5 py-2.5 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_24px_-10px_rgba(29,78,216,0.7),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-200 hover:-translate-y-[1px] hover:shadow-[0_16px_32px_-10px_rgba(29,78,216,0.85)]"
+            onClick={onCollectCopay}
+            type="button"
+          >
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.35)_50%,transparent_100%)] transition-transform duration-700 ease-out group-hover/cta:translate-x-[300%]"
+            />
+            <span className="relative z-10 inline-flex items-center gap-1.5">
+              Collect ₹{copay} copay
+              <ChevronRight className="h-3.5 w-3.5" />
+            </span>
+          </button>
+        ) : null}
+        <button
+          className="rounded-full border border-[#E2E8F0] bg-white px-4 py-2.5 text-[11px] font-bold uppercase tracking-[0.16em] text-[#1A2550] transition hover:border-[#CBD5E1]"
+          onClick={onClose}
+          type="button"
+        >
+          Done
+        </button>
+      </div>
+
+      <p className="mt-3 text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-[#94A3B8]">
+        Demo · estimates only
+      </p>
+    </ModalShell>
+  );
+}
 
 function HoldDialog({
   token,

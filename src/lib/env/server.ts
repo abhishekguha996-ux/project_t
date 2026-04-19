@@ -75,7 +75,10 @@ const serverEnvSchema = z.object({
   QCARE_DEFAULT_DOCTOR_PAUSE_MINUTES: optionalIntWithDefault(20),
   QCARE_DEFAULT_HOLD_SLOT_MINUTES: optionalIntWithDefault(5),
   QCARE_DEFAULT_CLINIC_ID: z.string().uuid().optional(),
-  QCARE_DEFAULT_DOCTOR_ID: z.string().uuid().optional()
+  QCARE_DEFAULT_DOCTOR_ID: z.string().uuid().optional(),
+  // Prāṇa — Claude API
+  ANTHROPIC_API_KEY: optionalString,
+  PRANA_MODEL: optionalString.default("claude-haiku-4-5-20251001")
 });
 
 let cachedEnv: z.infer<typeof serverEnvSchema> | null = null;

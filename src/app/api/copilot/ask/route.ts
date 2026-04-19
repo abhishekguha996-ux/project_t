@@ -1,14 +1,27 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { NextResponse } from "next/server";
 
 import { getCurrentClinicUser } from "@/lib/auth/current-user";
+import { getServerEnv } from "@/lib/env/server";
 import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import type { AppRole } from "@/lib/utils/types";
 
 /**
- * Co-pilot Q&A — natural-language to structured answer.
+ * Prāṇa — the soul of QCare.
  *
- * V1 is a deterministic NLU-lite: regex intent classification + entity extraction + DB lookup.
- * V2 will swap the classifier for Claude tool-use; the endpoint contract is stable.
+ * Conversational receptionist companion powered by Claude. Prāṇa can:
+ *   • Answer any question about patients, the queue, or the day
+ *   • Journal for the receptionist ("note that Savita seemed anxious today")
+ *   • Schedule reminders ("remind me in 20 min to call Ananya back")
+ *   • Read back upcoming reminders and recent journal entries
+ *
+ * Implementation: Claude tool-use loop. Prāṇa decides which tools to call, we
+ * execute them against Supabase, and hand the results back until it produces
+ * a final text answer. The endpoint contract on the client side is unchanged
+ * from v1, so the old answer-card UI still works.
+ *
+ * Fallback: if ANTHROPIC_API_KEY is missing, we return a polite degraded
+ * response rather than crashing.
  */
 
 type AnswerAction = {
@@ -37,128 +50,27 @@ function canAccess(role: AppRole) {
   return role === "clinic_admin" || role === "receptionist" || role === "doctor";
 }
 
-/* ------------ NLU-lite ------------ */
+type Supa = ReturnType<typeof getSupabaseServiceRoleClient>;
 
-type Intent =
-  | "is_returning"
-  | "is_new"
-  | "ask_phone"
-  | "ask_age"
-  | "ask_gender"
-  | "ask_language"
-  | "ask_allergies"
-  | "ask_blood_group"
-  | "ask_today_status"
-  | "ask_doctor"
-  | "ask_payment"
-  | "ask_last_visit"
-  | "ask_last_complaint"
-  | "ask_visit_count"
-  | "ask_queue_next"
-  | "ask_doctors_on"
-  | "unknown";
+/* ============================================================
+   Tool implementations — each runs Supabase queries scoped to
+   the authenticated user's clinic + actor.
+   ============================================================ */
 
-const STOP_TOKENS = new Set([
-  "is", "are", "was", "were", "be", "am",
-  "a", "an", "the", "of", "for", "to", "with",
-  "has", "have", "had", "does", "did", "do",
-  "on", "about", "please", "can", "you",
-  "tell", "me", "show", "say", "give", "check",
-  "what", "whats", "what's", "who", "whos", "who's",
-  "which", "when", "where", "how", "why",
-  "currently", "now", "today", "s"
-]);
-
-const ATTR_TOKENS = new Set([
-  "patient", "patients",
-  "returning", "new", "first", "time", "repeat", "return",
-  "phone", "number", "contact", "mobile", "cell",
-  "age", "old", "years", "year",
-  "gender", "male", "female", "sex",
-  "language", "speak", "speaks", "prefer", "prefers", "preferred",
-  "allergy", "allergies", "allergic",
-  "blood", "group", "bloodgroup", "bloodtype",
-  "visit", "visits", "visited", "visiting",
-  "last", "previous", "recent", "lastvisit",
-  "checkin", "check-in", "checked", "in", "queue", "waiting",
-  "doctor", "dr", "drs", "doctors",
-  "consulting", "seeing", "attending",
-  "payment", "paid", "pay", "bill", "billed", "billing",
-  "complaint", "complaints", "symptom", "symptoms",
-  "many", "total", "count", "number",
-  "next", "up",
-  "today", "todays", "today's",
-  "room"
-]);
-
-function normalize(q: string) {
-  return q
-    .toLowerCase()
-    .replace(/[?,.;:!'`]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function classifyIntent(raw: string): Intent {
-  const q = normalize(raw);
-  if (/\bblood\s*(group|type)\b|\bbg\b/.test(q)) return "ask_blood_group";
-  if (/\breturning\b|\brepeat\b|\breturn\s+patient\b/.test(q)) return "is_returning";
-  if (/\bnew\s+patient\b|\bfirst\s+time\b|\bfirst\s+visit\b/.test(q)) return "is_new";
-  if (/\bphone\b|\bnumber\b|\bcontact\b|\bmobile\b|\bcell\b/.test(q)) return "ask_phone";
-  if (/\bage\b|\bhow\s+old\b|\byears?\s+old\b/.test(q)) return "ask_age";
-  if (/\bgender\b|\bmale\b|\bfemale\b|\bsex\b/.test(q)) return "ask_gender";
-  if (/\blanguage\b|\bspeaks?\b|\bprefers?\b/.test(q)) return "ask_language";
-  if (/\ballerg/.test(q)) return "ask_allergies";
-  if (/\bpayment\b|\bpaid\b|\bbill/.test(q)) return "ask_payment";
-  if (/\blast\s+complaint\b|\bprevious\s+complaint\b|\blast\s+symptom\b/.test(q))
-    return "ask_last_complaint";
-  if (/\blast\s+visit\b|\bprevious\s+visit\b|\bwhen\s+did\b.*\bvisit\b/.test(q))
-    return "ask_last_visit";
-  if (/\btotal\s+visits\b|\bhow\s+many\s+visits\b|\bvisit\s+count\b/.test(q))
-    return "ask_visit_count";
-  if (/\bwho'?s?\s+next\b|\bnext\s+patient\b|\bnext\s+up\b/.test(q)) return "ask_queue_next";
-  if (/\b(which|what)\s+doctors?\b|\bdoctors\s+on\b|\bdoctors\s+today\b/.test(q))
-    return "ask_doctors_on";
-  if (/\b(which|what)\s+doctor\b|\bwith\s+doctor\b|\bconsulting\s+with\b|\bseeing\b/.test(q))
-    return "ask_doctor";
-  if (/\b(check\s*in|checked\s*in|in\s+(the\s+)?queue|in\s+waiting|today'?s?\s+status)\b/.test(q))
-    return "ask_today_status";
-  return "unknown";
-}
-
-function extractEntity(raw: string): { phone: string | null; nameQuery: string | null } {
-  const q = normalize(raw);
-  const digits = q.replace(/[^\d]/g, "");
-  const phone = digits.length >= 7 ? digits : null;
-
-  const tokens = q
-    .split(/\s+/)
-    .filter((t) => t && !STOP_TOKENS.has(t) && !ATTR_TOKENS.has(t) && !/^\d+$/.test(t));
-  const nameQuery = tokens.length > 0 ? tokens.join(" ").trim() : null;
-  return { phone, nameQuery };
-}
-
-/* ------------ DB helpers ------------ */
-
-async function findPatient(
-  supabase: ReturnType<typeof getSupabaseServiceRoleClient>,
+async function tool_search_patient(
+  supabase: Supa,
   clinicId: string,
-  phone: string | null,
-  nameQuery: string | null
-): Promise<AnswerPatient | null> {
+  args: { name?: string; phone?: string }
+): Promise<AnswerPatient | { not_found: true; query: string }> {
   let q = supabase
     .from("patients")
     .select("id, name, phone, age, gender, language_preference, allergies, created_at")
     .eq("clinic_id", clinicId)
     .limit(1);
-
-  if (phone) {
-    q = q.ilike("phone", `%${phone}%`);
-  } else if (nameQuery) {
-    q = q.ilike("name", `%${nameQuery}%`);
-  } else {
-    return null;
-  }
+  const phone = args.phone?.replace(/[^\d]/g, "") ?? "";
+  if (phone.length >= 5) q = q.ilike("phone", `%${phone}%`);
+  else if (args.name) q = q.ilike("name", `%${args.name}%`);
+  else return { not_found: true, query: "" };
 
   const { data } = await q;
   const row = ((data as Array<{
@@ -171,7 +83,8 @@ async function findPatient(
     allergies: string[] | null;
     created_at: string | null;
   }> | null) ?? [])[0];
-  if (!row) return null;
+
+  if (!row) return { not_found: true, query: args.name ?? args.phone ?? "" };
 
   const today = new Date().toISOString().slice(0, 10);
   const [{ data: todayTokens }, { data: allVisits }] = await Promise.all([
@@ -218,21 +131,20 @@ async function findPatient(
   };
 }
 
-async function findLastToken(
-  supabase: ReturnType<typeof getSupabaseServiceRoleClient>,
+async function tool_patient_last_visit(
+  supabase: Supa,
   clinicId: string,
-  patientId: string
+  args: { patient_id: string }
 ) {
   const today = new Date().toISOString().slice(0, 10);
   const { data } = await supabase
     .from("tokens")
     .select("id, token_number, date, raw_complaint, doctors(name)")
     .eq("clinic_id", clinicId)
-    .eq("patient_id", patientId)
+    .eq("patient_id", args.patient_id)
     .lt("date", today)
     .order("date", { ascending: false })
     .limit(1);
-
   const row = ((data as unknown) as
     | Array<{
         id: string;
@@ -242,72 +154,331 @@ async function findLastToken(
         doctors: { name?: string | null } | Array<{ name?: string | null }> | null;
       }>
     | null) ?? [];
-  if (row.length === 0) return null;
-  const doctor = Array.isArray(row[0].doctors) ? row[0].doctors[0] : row[0].doctors;
+  if (row.length === 0) return { none: true };
+  const d = Array.isArray(row[0].doctors) ? row[0].doctors[0] : row[0].doctors;
   return {
-    id: row[0].id,
+    token_id: row[0].id,
     token_number: row[0].token_number,
     date: row[0].date,
-    raw_complaint: row[0].raw_complaint,
-    doctor: doctor?.name ?? null
+    complaint: row[0].raw_complaint,
+    doctor: d?.name ?? null
   };
 }
 
-async function findPaymentForToday(
-  supabase: ReturnType<typeof getSupabaseServiceRoleClient>,
-  clinicId: string,
-  patientId: string
-) {
+async function tool_queue_snapshot(supabase: Supa, clinicId: string) {
   const today = new Date().toISOString().slice(0, 10);
-  const { data: tokens } = await supabase
+  const { data } = await supabase
     .from("tokens")
-    .select("id, status")
+    .select(
+      "id, token_number, status, raw_complaint, checked_in_at, patients(name), doctors(name)"
+    )
     .eq("clinic_id", clinicId)
-    .eq("patient_id", patientId)
-    .eq("date", today);
-
-  const ids = ((tokens as Array<{ id: string; status: string }> | null) ?? []).map((t) => t.id);
-  if (ids.length === 0) return null;
-
-  const { data: checkouts } = await supabase
-    .from("token_checkout")
-    .select("token_id, checkout_stage, payment_status")
-    .in("token_id", ids);
-  const row = ((checkouts as Array<{
-    token_id: string;
-    checkout_stage: string;
-    payment_status: string;
-  }> | null) ?? [])[0];
-  return row ?? null;
+    .eq("date", today)
+    .in("status", ["waiting", "serving", "stepped_out"])
+    .order("token_number", { ascending: true });
+  const rows = ((data as unknown) as
+    | Array<{
+        id: string;
+        token_number: number;
+        status: string;
+        raw_complaint: string | null;
+        checked_in_at: string;
+        patients: { name?: string | null } | Array<{ name?: string | null }> | null;
+        doctors: { name?: string | null } | Array<{ name?: string | null }> | null;
+      }>
+    | null) ?? [];
+  return rows.map((r) => {
+    const p = Array.isArray(r.patients) ? r.patients[0] : r.patients;
+    const d = Array.isArray(r.doctors) ? r.doctors[0] : r.doctors;
+    return {
+      token_id: r.id,
+      token_number: r.token_number,
+      status: r.status,
+      complaint: r.raw_complaint,
+      minutes_waited: Math.round((Date.now() - new Date(r.checked_in_at).getTime()) / 60000),
+      patient: p?.name ?? null,
+      doctor: d?.name ?? null
+    };
+  });
 }
 
-function isSameDate(iso: string, d: Date) {
-  const x = new Date(iso);
-  return (
-    x.getUTCFullYear() === d.getUTCFullYear() &&
-    x.getUTCMonth() === d.getUTCMonth() &&
-    x.getUTCDate() === d.getUTCDate()
-  );
+async function tool_doctors_on_duty(supabase: Supa, clinicId: string) {
+  const { data } = await supabase
+    .from("doctors")
+    .select("id, name, specialty, room, status")
+    .eq("clinic_id", clinicId)
+    .order("name", { ascending: true });
+  return (data as Array<{
+    id: string;
+    name: string;
+    specialty: string | null;
+    room: string | null;
+    status: string;
+  }> | null) ?? [];
 }
 
-function fmtDate(iso: string | null) {
-  if (!iso) return "";
-  return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium" }).format(new Date(iso));
+async function tool_journal_add(
+  supabase: Supa,
+  clinicId: string,
+  actorClerkId: string,
+  actorRole: AppRole,
+  args: { body: string; mood?: string; tags?: string[]; patient_id?: string; token_id?: string }
+) {
+  const { data, error } = await supabase
+    .from("prana_journal")
+    .insert({
+      clinic_id: clinicId,
+      actor_clerk_id: actorClerkId,
+      actor_role: actorRole,
+      body: args.body,
+      mood: args.mood ?? null,
+      tags: args.tags ?? [],
+      patient_id: args.patient_id ?? null,
+      token_id: args.token_id ?? null
+    })
+    .select("id, created_at")
+    .single();
+  if (error) return { ok: false, error: error.message };
+  return { ok: true, id: (data as { id: string }).id, created_at: (data as { created_at: string }).created_at };
 }
 
-function langFull(c?: string | null) {
-  const m: Record<string, string> = {
-    en: "English",
-    hi: "Hindi",
-    ta: "Tamil",
-    te: "Telugu",
-    kn: "Kannada",
-    ml: "Malayalam"
+async function tool_journal_recent(
+  supabase: Supa,
+  clinicId: string,
+  actorClerkId: string,
+  args: { limit?: number }
+) {
+  const limit = Math.min(Math.max(args.limit ?? 5, 1), 20);
+  const { data } = await supabase
+    .from("prana_journal")
+    .select("id, body, mood, tags, created_at, patients(name)")
+    .eq("clinic_id", clinicId)
+    .eq("actor_clerk_id", actorClerkId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  const rows = ((data as unknown) as
+    | Array<{
+        id: string;
+        body: string;
+        mood: string | null;
+        tags: string[] | null;
+        created_at: string;
+        patients: { name?: string | null } | Array<{ name?: string | null }> | null;
+      }>
+    | null) ?? [];
+  return rows.map((r) => {
+    const p = Array.isArray(r.patients) ? r.patients[0] : r.patients;
+    return {
+      id: r.id,
+      body: r.body,
+      mood: r.mood,
+      tags: r.tags ?? [],
+      created_at: r.created_at,
+      patient: p?.name ?? null
+    };
+  });
+}
+
+async function tool_reminder_add(
+  supabase: Supa,
+  clinicId: string,
+  actorClerkId: string,
+  actorRole: AppRole,
+  args: {
+    title: string;
+    details?: string;
+    remind_in_minutes?: number;
+    remind_at?: string;
+    patient_id?: string;
+    token_id?: string;
+  }
+) {
+  let remindAt: Date;
+  if (args.remind_at) {
+    remindAt = new Date(args.remind_at);
+    if (Number.isNaN(remindAt.getTime())) {
+      return { ok: false, error: "Invalid remind_at" };
+    }
+  } else if (typeof args.remind_in_minutes === "number") {
+    remindAt = new Date(Date.now() + args.remind_in_minutes * 60_000);
+  } else {
+    return { ok: false, error: "Need remind_at or remind_in_minutes" };
+  }
+
+  const { data, error } = await supabase
+    .from("prana_reminders")
+    .insert({
+      clinic_id: clinicId,
+      actor_clerk_id: actorClerkId,
+      actor_role: actorRole,
+      title: args.title,
+      details: args.details ?? null,
+      remind_at: remindAt.toISOString(),
+      patient_id: args.patient_id ?? null,
+      token_id: args.token_id ?? null
+    })
+    .select("id, remind_at")
+    .single();
+  if (error) return { ok: false, error: error.message };
+  return {
+    ok: true,
+    id: (data as { id: string }).id,
+    remind_at: (data as { remind_at: string }).remind_at
   };
-  return m[(c ?? "").toLowerCase()] ?? (c ?? "unknown");
 }
 
-function defaultActions(p: AnswerPatient): AnswerAction[] {
+async function tool_reminder_upcoming(
+  supabase: Supa,
+  clinicId: string,
+  actorClerkId: string,
+  args: { hours_ahead?: number }
+) {
+  const hoursAhead = Math.min(Math.max(args.hours_ahead ?? 24, 1), 168);
+  const now = new Date();
+  const horizon = new Date(now.getTime() + hoursAhead * 3_600_000);
+  const { data } = await supabase
+    .from("prana_reminders")
+    .select("id, title, details, remind_at, patients(name)")
+    .eq("clinic_id", clinicId)
+    .eq("actor_clerk_id", actorClerkId)
+    .eq("status", "pending")
+    .lte("remind_at", horizon.toISOString())
+    .order("remind_at", { ascending: true })
+    .limit(20);
+  const rows = ((data as unknown) as
+    | Array<{
+        id: string;
+        title: string;
+        details: string | null;
+        remind_at: string;
+        patients: { name?: string | null } | Array<{ name?: string | null }> | null;
+      }>
+    | null) ?? [];
+  return rows.map((r) => {
+    const p = Array.isArray(r.patients) ? r.patients[0] : r.patients;
+    return {
+      id: r.id,
+      title: r.title,
+      details: r.details,
+      remind_at: r.remind_at,
+      minutes_from_now: Math.round(
+        (new Date(r.remind_at).getTime() - Date.now()) / 60_000
+      ),
+      patient: p?.name ?? null
+    };
+  });
+}
+
+/* ============================================================
+   Claude tool definitions
+   ============================================================ */
+
+const tools: Anthropic.Tool[] = [
+  {
+    name: "search_patient",
+    description:
+      "Find a patient in this clinic by name or phone. Returns their profile plus any token for today (number, status, doctor). Prefer phone when the user gives digits; otherwise match by name substring.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Full or partial name." },
+        phone: { type: "string", description: "Phone number digits, with or without +91." }
+      }
+    }
+  },
+  {
+    name: "patient_last_visit",
+    description:
+      "Get the most recent prior-day visit for a patient (date, doctor, complaint).",
+    input_schema: {
+      type: "object",
+      properties: {
+        patient_id: { type: "string", description: "UUID from search_patient." }
+      },
+      required: ["patient_id"]
+    }
+  },
+  {
+    name: "queue_snapshot",
+    description:
+      "Snapshot of today's active queue across all doctors — every token that is waiting, serving, or stepped_out. Includes how long each person has been waiting.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "doctors_on_duty",
+    description: "List doctors on the roster today with their specialty, room, and status.",
+    input_schema: { type: "object", properties: {} }
+  },
+  {
+    name: "journal_add",
+    description:
+      "Save a private journal/diary note for the current receptionist. Use this when the user says things like 'note that…', 'remember for me…', 'jot down…', 'I want to remember…'. You may optionally tag the note with a patient_id.",
+    input_schema: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "The note content. Keep the user's voice." },
+        mood: {
+          type: "string",
+          enum: ["calm", "rushed", "stressed", "proud", "tired", "curious"]
+        },
+        tags: { type: "array", items: { type: "string" } },
+        patient_id: { type: "string" },
+        token_id: { type: "string" }
+      },
+      required: ["body"]
+    }
+  },
+  {
+    name: "journal_recent",
+    description: "Read back recent journal entries for the current receptionist.",
+    input_schema: {
+      type: "object",
+      properties: { limit: { type: "integer", minimum: 1, maximum: 20 } }
+    }
+  },
+  {
+    name: "reminder_add",
+    description:
+      "Schedule a reminder for the current receptionist. Either pass remind_in_minutes (e.g. 20) OR an absolute remind_at ISO timestamp. Use this when the user says 'remind me in/at/when…'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        details: { type: "string" },
+        remind_in_minutes: { type: "integer", minimum: 1, maximum: 1440 },
+        remind_at: { type: "string", description: "ISO 8601 timestamp, UTC." },
+        patient_id: { type: "string" },
+        token_id: { type: "string" }
+      },
+      required: ["title"]
+    }
+  },
+  {
+    name: "reminder_upcoming",
+    description: "List pending reminders for the current receptionist in the next N hours.",
+    input_schema: {
+      type: "object",
+      properties: {
+        hours_ahead: { type: "integer", minimum: 1, maximum: 168 }
+      }
+    }
+  }
+];
+
+/* ============================================================
+   Route
+   ============================================================ */
+
+type CoPilotResponse = {
+  ok: true;
+  answer: string;
+  intent?: string;
+  patient: AnswerPatient | null;
+  actions: AnswerAction[];
+};
+
+function defaultActions(p: AnswerPatient | null): AnswerAction[] {
+  if (!p) return [];
   const a: AnswerAction[] = [];
   if (p.phone) a.push({ label: `Call ${p.phone}`, href: `tel:${p.phone}`, kind: "call" });
   if (p.todayTokenId) {
@@ -318,8 +489,6 @@ function defaultActions(p: AnswerPatient): AnswerAction[] {
   return a;
 }
 
-/* ------------ route ------------ */
-
 export async function POST(request: Request) {
   const user = await getCurrentClinicUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -328,201 +497,182 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as { question?: string } | null;
   const question = (body?.question ?? "").trim();
   if (question.length < 2) {
-    return NextResponse.json({
+    return NextResponse.json<CoPilotResponse>({
       ok: true,
-      answer: "Ask me something — e.g. \"Is Swaminathan a returning patient?\"",
+      answer: "Ask me anything — about a patient, the queue, or say 'remind me in 10 min…'",
+      patient: null,
+      actions: []
+    });
+  }
+
+  const env = getServerEnv();
+  if (!env.ANTHROPIC_API_KEY) {
+    return NextResponse.json<CoPilotResponse>({
+      ok: true,
+      answer:
+        "I'm not connected to my brain yet. Add ANTHROPIC_API_KEY=sk-ant-… to .env.local and restart the dev server. Get a key at console.anthropic.com/settings/keys.",
       patient: null,
       actions: []
     });
   }
 
   const supabase = getSupabaseServiceRoleClient();
-  const intent = classifyIntent(question);
-  const { phone, nameQuery } = extractEntity(question);
+  const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
 
-  /* ---- clinic-scope intents (no entity needed) ---- */
-  if (intent === "ask_queue_next") {
-    const today = new Date().toISOString().slice(0, 10);
-    const { data } = await supabase
-      .from("tokens")
-      .select("id, token_number, patient_id, patients(name), doctors(name)")
-      .eq("clinic_id", user.clinicId)
-      .eq("date", today)
-      .eq("status", "waiting")
-      .order("token_number", { ascending: true })
-      .limit(1);
-    const row = ((data as unknown) as
-      | Array<{
-          id: string;
-          token_number: number;
-          patients: { name?: string | null } | Array<{ name?: string | null }> | null;
-          doctors: { name?: string | null } | Array<{ name?: string | null }> | null;
-        }>
-      | null) ?? [];
-    if (row.length === 0) {
-      return NextResponse.json({
-        ok: true,
-        answer: "Nobody is waiting right now across any doctor.",
-        patient: null,
-        actions: []
-      });
+  // Track the "subject" patient for the response so the UI's patient card
+  // surfaces the right person when Prāṇa's answer was about them.
+  let lastPatient: AnswerPatient | null = null;
+
+  async function runTool(name: string, input: Record<string, unknown>): Promise<unknown> {
+    switch (name) {
+      case "search_patient": {
+        const res = await tool_search_patient(supabase, user!.clinicId, input as { name?: string; phone?: string });
+        if (!("not_found" in res)) lastPatient = res;
+        return res;
+      }
+      case "patient_last_visit":
+        return tool_patient_last_visit(supabase, user!.clinicId, input as { patient_id: string });
+      case "queue_snapshot":
+        return tool_queue_snapshot(supabase, user!.clinicId);
+      case "doctors_on_duty":
+        return tool_doctors_on_duty(supabase, user!.clinicId);
+      case "journal_add":
+        return tool_journal_add(supabase, user!.clinicId, user!.clerkUserId, user!.role, input as {
+          body: string;
+          mood?: string;
+          tags?: string[];
+          patient_id?: string;
+          token_id?: string;
+        });
+      case "journal_recent":
+        return tool_journal_recent(supabase, user!.clinicId, user!.clerkUserId, input as { limit?: number });
+      case "reminder_add":
+        return tool_reminder_add(supabase, user!.clinicId, user!.clerkUserId, user!.role, input as {
+          title: string;
+          details?: string;
+          remind_in_minutes?: number;
+          remind_at?: string;
+          patient_id?: string;
+          token_id?: string;
+        });
+      case "reminder_upcoming":
+        return tool_reminder_upcoming(supabase, user!.clinicId, user!.clerkUserId, input as { hours_ahead?: number });
+      default:
+        return { error: `Unknown tool: ${name}` };
     }
-    const p = Array.isArray(row[0].patients) ? row[0].patients[0] : row[0].patients;
-    const d = Array.isArray(row[0].doctors) ? row[0].doctors[0] : row[0].doctors;
-    return NextResponse.json({
-      ok: true,
-      answer: `Next is #${row[0].token_number} ${p?.name ?? "Patient"} for ${d?.name ?? "a doctor"}.`,
-      patient: null,
-      actions: [
-        { label: "View tracking", href: `/track/${row[0].id}`, kind: "link" }
-      ]
-    });
-  }
-
-  if (intent === "ask_doctors_on") {
-    const { data } = await supabase
-      .from("doctors")
-      .select("name, specialty, room, status")
-      .eq("clinic_id", user.clinicId)
-      .neq("status", "offline")
-      .order("name", { ascending: true });
-    const rows = (data as Array<{
-      name: string;
-      specialty: string | null;
-      room: string | null;
-      status: string;
-    }> | null) ?? [];
-    if (rows.length === 0) {
-      return NextResponse.json({
-        ok: true,
-        answer: "No active doctors today.",
-        patient: null,
-        actions: []
-      });
-    }
-    const listed = rows
-      .map((r) => `${r.name}${r.specialty ? ` · ${r.specialty}` : ""}${r.room ? ` · ${r.room}` : ""}`)
-      .join("; ");
-    return NextResponse.json({
-      ok: true,
-      answer: `On today: ${listed}.`,
-      patient: null,
-      actions: []
-    });
-  }
-
-  /* ---- entity-scoped intents ---- */
-  const patient = await findPatient(supabase, user.clinicId, phone, nameQuery);
-
-  if (!patient) {
-    return NextResponse.json({
-      ok: true,
-      answer:
-        nameQuery || phone
-          ? `I couldn't find a patient matching "${nameQuery ?? phone}". Try a full name or phone number.`
-          : "I couldn't tell which patient you meant. Try including a name or phone.",
-      patient: null,
-      actions: []
-    });
   }
 
   const now = new Date();
-  const isFirstVisit = patient.created_at ? isSameDate(patient.created_at, now) : false;
+  const nowIST = new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "full",
+    timeStyle: "short",
+    timeZone: "Asia/Kolkata"
+  }).format(now);
 
-  let answer = "";
-  switch (intent) {
-    case "is_returning":
-      answer = isFirstVisit
-        ? `No — ${patient.name} is a new patient today. First record created ${fmtDate(patient.created_at)}.`
-        : `Yes — ${patient.name} is returning. First seen ${fmtDate(patient.created_at)}, ${patient.totalVisits} total visit${patient.totalVisits === 1 ? "" : "s"}.`;
-      break;
-    case "is_new":
-      answer = isFirstVisit
-        ? `Yes — ${patient.name} is new. First record created ${fmtDate(patient.created_at)}.`
-        : `No — ${patient.name} has visited before. First seen ${fmtDate(patient.created_at)}, ${patient.totalVisits} total visit${patient.totalVisits === 1 ? "" : "s"}.`;
-      break;
-    case "ask_phone":
-      answer = `${patient.name}'s phone is ${patient.phone}.`;
-      break;
-    case "ask_age":
-      answer = patient.age
-        ? `${patient.name} is ${patient.age} years old.`
-        : `Age isn't recorded for ${patient.name}.`;
-      break;
-    case "ask_gender":
-      answer = patient.gender
-        ? `${patient.name}'s gender on file is ${patient.gender}.`
-        : `Gender isn't recorded for ${patient.name}.`;
-      break;
-    case "ask_language":
-      answer = `${patient.name} prefers ${langFull(patient.language_preference)}.`;
-      break;
-    case "ask_allergies":
-      answer = patient.allergies.length > 0
-        ? `${patient.name}'s recorded allergies: ${patient.allergies.join(", ")}.`
-        : `No allergies recorded for ${patient.name}.`;
-      break;
-    case "ask_blood_group":
-      answer = `Blood group isn't captured at QR check-in yet — we only collect name, phone, age, gender, language, allergies, and the complaint. Add it to check-in if you want it queryable.`;
-      break;
-    case "ask_today_status": {
-      if (patient.todayStatus) {
-        answer = `Yes — ${patient.name} is token #${patient.todayTokenNumber}, currently ${patient.todayStatus}${patient.todayDoctor ? ` with ${patient.todayDoctor}` : ""}.`;
-      } else {
-        answer = `${patient.name} hasn't checked in today.`;
-      }
-      break;
+  // Friendly, specific error when the Anthropic call fails so the user isn't
+  // left with the generic client-side fallback.
+  function errorAnswer(e: unknown): CoPilotResponse {
+    const raw = e instanceof Error ? e.message : String(e);
+    console.error("[Prāṇa] Claude call failed:", raw);
+    let answer = `Prāṇa tripped on: ${raw.slice(0, 220)}`;
+    const lower = raw.toLowerCase();
+    if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid api key") || lower.includes("x-api-key")) {
+      answer =
+        "ANTHROPIC_API_KEY looks invalid. Check the key in .env.local — should start with sk-ant-…";
+    } else if (lower.includes("model") && (lower.includes("not_found") || lower.includes("not found") || lower.includes("404") || lower.includes("does not exist"))) {
+      answer = `Model "${env.PRANA_MODEL}" isn't available on your API key. Try PRANA_MODEL=claude-haiku-4-5 or claude-sonnet-4-5 in .env.local and restart.`;
+    } else if (lower.includes("rate") && lower.includes("limit")) {
+      answer = "Rate-limited by Anthropic. Give it a few seconds and try again.";
+    } else if (lower.includes("overloaded")) {
+      answer = "Anthropic is overloaded right now. Try again in a moment.";
     }
-    case "ask_doctor": {
-      if (patient.todayDoctor) {
-        answer = `${patient.name} is with ${patient.todayDoctor} today (token #${patient.todayTokenNumber}, ${patient.todayStatus}).`;
-      } else {
-        answer = `${patient.name} isn't assigned to a doctor today — no token yet.`;
-      }
-      break;
-    }
-    case "ask_payment": {
-      const co = await findPaymentForToday(supabase, user.clinicId, patient.id);
-      if (!co) {
-        answer = patient.todayStatus
-          ? `${patient.name} hasn't reached checkout yet today — current state is ${patient.todayStatus}.`
-          : `${patient.name} hasn't checked in today.`;
-      } else {
-        answer = `${patient.name}'s payment is ${co.payment_status}; checkout stage is ${co.checkout_stage.replace(/_/g, " ")}.`;
-      }
-      break;
-    }
-    case "ask_last_visit": {
-      const last = await findLastToken(supabase, user.clinicId, patient.id);
-      answer = last
-        ? `Last visit was ${fmtDate(last.date)} — token #${last.token_number}${last.doctor ? ` with ${last.doctor}` : ""}.`
-        : isFirstVisit
-          ? `${patient.name} is a new patient — no prior visits.`
-          : `No earlier visit recorded for ${patient.name}.`;
-      break;
-    }
-    case "ask_last_complaint": {
-      const last = await findLastToken(supabase, user.clinicId, patient.id);
-      answer = last
-        ? last.raw_complaint
-          ? `Last complaint (${fmtDate(last.date)}): "${last.raw_complaint}".`
-          : `Last visit was on ${fmtDate(last.date)} but no complaint text was saved.`
-        : `No earlier visit recorded for ${patient.name}.`;
-      break;
-    }
-    case "ask_visit_count":
-      answer = `${patient.name} has ${patient.totalVisits} visit${patient.totalVisits === 1 ? "" : "s"} on record.`;
-      break;
-    default:
-      // Unknown intent — give a compact profile summary as a sensible fallback.
-      answer = `${patient.name} — ${patient.phone}${patient.age ? `, ${patient.age}` : ""}${patient.gender ? `, ${patient.gender}` : ""}${patient.language_preference && patient.language_preference !== "en" ? `, speaks ${langFull(patient.language_preference)}` : ""}. ${isFirstVisit ? "New patient today." : `Returning — ${patient.totalVisits} visits since ${fmtDate(patient.created_at)}.`}`;
+    return { ok: true, answer, patient: null, actions: [] };
   }
 
-  return NextResponse.json({
+  const systemPrompt = `You are Prāṇa — the soul of QCare, an Indian clinic management platform. Prāṇa means "life force" in Sanskrit; you help the clinic breathe.
+
+Right now you're the silent co-worker of a ${user.role.replace(/_/g, " ")} at an Indian outpatient clinic. Current time: ${nowIST} (Asia/Kolkata).
+
+Your capabilities via tools:
+  • search_patient, patient_last_visit — answer questions about patients
+  • queue_snapshot — who's waiting, with whom, for how long
+  • doctors_on_duty — clinic roster
+  • journal_add, journal_recent — receptionist's private journal ("note that…", "remember for me…")
+  • reminder_add, reminder_upcoming — receptionist's calendar ("remind me in 20 min…")
+
+Style guide:
+  • Be terse and human. 1–3 sentences. Never lecture.
+  • Use Indian clinic language — "token #12", "with Dr. Arjun", "₹500", "IST".
+  • When the user says "note/remember/jot/diary", CALL journal_add — don't just reply.
+  • When they say "remind me", CALL reminder_add.
+  • When they ask about a patient, CALL search_patient first, then answer.
+  • If a tool returns not_found, say so clearly. Don't invent data.
+  • When you save a journal entry or reminder, confirm briefly — "Noted." or "Reminder set for 3:42 PM."
+  • Never expose UUIDs or internal IDs in your answer.
+`;
+
+  const messages: Anthropic.MessageParam[] = [
+    { role: "user", content: question }
+  ];
+
+  // Tool-use loop. Cap at 6 iterations to keep cost/latency bounded.
+  let finalText = "";
+  try {
+    for (let i = 0; i < 6; i++) {
+      const resp = await anthropic.messages.create({
+        model: env.PRANA_MODEL,
+        max_tokens: 1024,
+        system: systemPrompt,
+        tools,
+        messages
+      });
+
+      const toolUses = resp.content.filter(
+        (b): b is Anthropic.ToolUseBlock => b.type === "tool_use"
+      );
+      const texts = resp.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("\n")
+        .trim();
+
+      if (toolUses.length === 0) {
+        finalText = texts;
+        break;
+      }
+
+      messages.push({ role: "assistant", content: resp.content });
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      for (const use of toolUses) {
+        const out = await runTool(use.name, use.input as Record<string, unknown>).catch(
+          (e: unknown) => ({ error: String(e) })
+        );
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: use.id,
+          content: JSON.stringify(out)
+        });
+      }
+      messages.push({ role: "user", content: toolResults });
+
+      if (resp.stop_reason !== "tool_use") {
+        finalText = texts;
+        break;
+      }
+    }
+  } catch (e) {
+    return NextResponse.json<CoPilotResponse>(errorAnswer(e));
+  }
+
+  if (!finalText) {
+    finalText = "I got stuck — could you rephrase that?";
+  }
+
+  return NextResponse.json<CoPilotResponse>({
     ok: true,
-    intent,
-    answer,
-    patient,
-    actions: defaultActions(patient)
+    answer: finalText,
+    patient: lastPatient,
+    actions: defaultActions(lastPatient)
   });
 }
