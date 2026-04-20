@@ -3,6 +3,11 @@ export type AppRole = "clinic_admin" | "receptionist" | "doctor";
 export type SubscriptionTier = "free" | "starter" | "pro" | "enterprise";
 export type DoctorStatus = "active" | "break" | "paused" | "offline";
 export type PatientGender = "male" | "female" | "other";
+export type PatientPregnancyStatus =
+  | "unknown"
+  | "pregnant"
+  | "not_pregnant"
+  | "prefer_not_to_say";
 export type TokenStatus =
   | "waiting"
   | "serving"
@@ -72,6 +77,7 @@ export interface Patient {
   name: string;
   age: number | null;
   gender: PatientGender | null;
+  pregnancy_status: PatientPregnancyStatus;
   allergies: string[] | null;
   language_preference: string;
   created_at: string;

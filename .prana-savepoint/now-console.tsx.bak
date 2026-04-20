@@ -59,9 +59,6 @@ type QueueItem = {
   proximity_status?: ProximityStatus | null;
   held_from_state?: string | null;
   seen_by_doctor?: boolean;
-  /** Set by the queue API when a token looks aged-out — dated before today
-   *  or checked_in_at >12h ago. Drives quarantined-card + stale rollup. */
-  is_stale?: boolean;
   patients: {
     name?: string | null;
     phone?: string | null;
@@ -99,8 +96,7 @@ type NeedsYouClassKey =
   | "sms_failed"
   | "hold_expired"
   | "hold_active"
-  | "held_mid_consult"
-  | "stale_token";
+  | "held_mid_consult";
 
 /**
  * Action Center render entry — either an atomic item (shown as a normal row)
@@ -126,7 +122,6 @@ type NeedsYouItem = {
   detail: string;
   primary?: { label: string; run: () => Promise<void> | void };
   secondary?: { label: string; run: () => Promise<void> | void };
-  tertiary?: { label: string; run: () => Promise<void> | void };
   /**
    * Optional operational class. When two or more items share a classKey they
    * roll up into a single summary row with expand-on-demand. Safety items
@@ -238,29 +233,6 @@ function isSameDate(a: string, b: Date) {
     d.getUTCMonth() === b.getUTCMonth() &&
     d.getUTCDate() === b.getUTCDate()
   );
-}
-
-type CockpitDensity = "regular" | "compact" | "tight";
-
-function densityFromViewport(width: number, height: number): CockpitDensity {
-  if (height <= 940 || width <= 1320) return "tight";
-  if (height <= 1080 || width <= 1500) return "compact";
-  return "regular";
-}
-
-function useCockpitDensity(): CockpitDensity {
-  const [density, setDensity] = useState<CockpitDensity>("regular");
-
-  useEffect(() => {
-    function updateDensity() {
-      setDensity(densityFromViewport(window.innerWidth, window.innerHeight));
-    }
-    updateDensity();
-    window.addEventListener("resize", updateDensity);
-    return () => window.removeEventListener("resize", updateDensity);
-  }, []);
-
-  return density;
 }
 function langLabel(code?: string | null) {
   const c = (code ?? "en").toLowerCase();
@@ -427,8 +399,6 @@ export function NowConsole({
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherBtnRef = useRef<HTMLButtonElement | null>(null);
   const copilotRef = useRef<HTMLInputElement | null>(null);
-  const cockpitDensity = useCockpitDensity();
-  const compactCockpit = cockpitDensity !== "regular";
 
   const selectedDoctor = useMemo(
     () => doctors.find((d) => d.id === doctorId) ?? doctors[0] ?? null,
@@ -517,7 +487,6 @@ export function NowConsole({
       | "start_consultation"
       | "mark_consultation_done"
       | "skip"
-      | "close_inactive"
       | "hold_slot"
       | "return_to_waiting",
     tokenId: string,
@@ -740,45 +709,6 @@ export function NowConsole({
       });
     });
 
-    /* ═══ ARCH STEP 2 — stale-token rollup class — start ═══ */
-    // Stale tokens are operational noise until resolved. The safe cleanup
-    // path is a silent close rather than a patient-visible "skip" event.
-    // Returning to waiting remains the right recovery if reception confirms
-    // the patient is still present.
-    queue.forEach((t) => {
-      if (!t.is_stale) return;
-      const name = t.patients?.name ?? "Patient";
-      const hoursAgo = Math.floor(minutesSince(t.checked_in_at) / 60);
-      items.push({
-        id: `stale-${t.id}`,
-        severity: "amber",
-        priority: 52,
-        classKey: "stale_token",
-        patientLabel: `#${t.token_number} ${name}`,
-        title: `Possible stale token — #${t.token_number} ${name}`,
-        detail: hoursAgo >= 24
-          ? "Checked in yesterday or earlier — verify before closing."
-          : `Waiting ${hoursAgo}h+ — likely inactive. Verify before closing.`,
-        primary: {
-          label: "Close token",
-          run: () => runAction("close_inactive", t.id)
-        },
-        secondary: {
-          label: "Rejoin queue",
-          run: () => runAction("return_to_waiting", t.id)
-        },
-        tertiary: t.patients?.phone
-          ? {
-              label: "Call",
-              run: () => {
-                window.location.href = `tel:${t.patients?.phone}`;
-              }
-            }
-          : undefined
-      });
-    });
-    /* ═══ ARCH STEP 2 — end ═══ */
-
     return items
       .filter((i) => !dismissed.has(i.id))
       .sort((a, b) => b.priority - a.priority);
@@ -992,7 +922,7 @@ export function NowConsole({
 
   if (!doctors.length) {
     return (
-      <section className="relative flex min-h-[100svh] items-center justify-center bg-[#FBFBFD] px-6 py-10">
+      <section className="relative flex min-h-[100dvh] items-center justify-center bg-[#FBFBFD] px-6 py-10">
         <div className="max-w-md rounded-[44px] border border-white bg-white/95 p-8 text-center shadow-[0_25px_50px_-12px_rgba(0,0,0,0.08)] backdrop-blur-xl">
           <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
             Reception
@@ -1009,12 +939,7 @@ export function NowConsole({
   }
 
   return (
-    <section
-      className={cn(
-        "relative flex h-[100svh] min-h-[100svh] flex-col overflow-hidden bg-[#FBFBFD]",
-        compactCockpit ? "px-4 pb-2 pt-3.5 sm:px-6 sm:pb-3" : "px-5 pb-3 pt-4.5 sm:px-8 sm:pb-4"
-      )}
-    >
+    <section className="relative flex h-[100dvh] flex-col overflow-hidden bg-[#FBFBFD] px-5 pb-3 pt-5 sm:px-8 sm:pb-4">
       <div className="pointer-events-none absolute right-[-20%] top-[-24%] -z-0 h-[860px] w-[860px] rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.14)_0%,rgba(255,255,255,0.98)_70%)]" />
       <div className="pointer-events-none absolute left-[-14%] bottom-[-10%] -z-0 h-[720px] w-[720px] rounded-full bg-[radial-gradient(circle,rgba(16,185,129,0.08)_0%,rgba(255,255,255,0)_70%)]" />
 
@@ -1022,8 +947,7 @@ export function NowConsole({
         {/* Hero */}
         <header
           className={cn(
-            "rounded-[40px] border bg-white/90 backdrop-blur-xl transition-all",
-            compactCockpit ? "mb-4 px-5 py-3.5" : "mb-5 px-6 py-4",
+            "mb-5 rounded-[40px] border bg-white/90 px-6 py-4 backdrop-blur-xl transition-all",
             activePause
               ? "border-[#FDE68A] ring-1 ring-[#FDE68A]/50 shadow-[0_25px_50px_-14px_rgba(245,158,11,0.28)]"
               : "border-white shadow-[0_25px_50px_-12px_rgba(0,0,0,0.08)]"
@@ -1032,8 +956,8 @@ export function NowConsole({
           {/* 3-column grid: doctor identity on the left, metric pills dead-
               centered in the header via equal-weight 1fr flanks, empty spacer
               on the right to mirror the left column's weight. */}
-          <div className={cn("grid grid-cols-[1fr_auto_1fr] items-center", compactCockpit ? "gap-4" : "gap-6")}>
-            <div className={cn(compactCockpit ? "min-w-[240px]" : "min-w-[280px]")}>
+          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-6">
+            <div className="min-w-[280px]">
               {activePause ? (
                 <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#B45309]">
                   <PauseCircle className="mr-1 -mt-0.5 inline-block h-3 w-3" />
@@ -1053,12 +977,7 @@ export function NowConsole({
                 ref={switcherBtnRef}
                 type="button"
               >
-                <span
-                  className={cn(
-                    "font-extrabold leading-[1] tracking-[-0.04em] text-[#0B1840]",
-                    compactCockpit ? "text-[1.72rem]" : "text-[1.9rem]"
-                  )}
-                >
+                <span className="text-[1.9rem] font-extrabold leading-[1] tracking-[-0.04em] text-[#0B1840]">
                   {doctorName}
                 </span>
                 <ChevronDown
@@ -1171,65 +1090,57 @@ export function NowConsole({
         </header>
 
         {error ? (
-          <div className={cn("rounded-[24px] border border-[#FECACA] bg-[#FFF1F2] px-5 py-3 text-sm font-semibold text-[#B91C1C] shadow-[0_12px_30px_-22px_rgba(185,28,28,0.45)]", compactCockpit ? "mb-4" : "mb-5")}>
+          <div className="mb-5 rounded-[24px] border border-[#FECACA] bg-[#FFF1F2] px-5 py-3 text-sm font-semibold text-[#B91C1C] shadow-[0_12px_30px_-22px_rgba(185,28,28,0.45)]">
             {error}
           </div>
         ) : null}
 
 
-        {/* ═══ ARCH STEP 3 — cockpit layout: rail above, 2-col below ═══ */}
-        <div className={cn("flex min-h-0 flex-1 flex-col", compactCockpit ? "gap-3" : "gap-4")}>
-          <LiveServingRail
+        <div className="grid min-h-0 flex-1 auto-rows-fr gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)]">
+          <WithDoctorCard
             clinicName={clinic?.name ?? "the clinic"}
-            density={cockpitDensity}
             isWorking={isWorking}
+            onCollectPayment={(t) => setPaymentTarget(t)}
             onDone={(id) => runAction("mark_consultation_done", id)}
             onHold={() => currentServing && setHoldTarget(currentServing)}
+            onOpenInsurance={(t) => setInsuranceTarget(t)}
+            onOpenProximity={(t) => setProximityTarget(t)}
+            onOpenVitals={(t) => setVitalsTarget(t)}
             onSkip={(id) => runAction("skip", id)}
             token={currentServing}
           />
-          <div
-            className={cn(
-              "grid min-h-0 flex-1 auto-rows-fr lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]",
-              compactCockpit ? "gap-3" : "gap-4"
-            )}
-          >
-            <NextCard
-              density={cockpitDensity}
-              token={nextWaiting}
-              clinicName={clinic?.name ?? "the clinic"}
-              upcoming={upcomingAfterNext}
-              isWorking={isWorking || Boolean(currentServing)}
-              behind={Math.max(0, waitingList.length - 1)}
-              onCollectPayment={(t) => setPaymentTarget(t)}
-              onOpenInsurance={(t) => setInsuranceTarget(t)}
-              onOpenProximity={(t) => setProximityTarget(t)}
-              onOpenVitals={(t) => setVitalsTarget(t)}
-              onStart={(id) => runAction("start_consultation", id)}
-              onOpenProfile={(pid) => {
-                void (async () => {
-                  const res = await fetch(
-                    `/api/patients/search?q=${encodeURIComponent(nextWaiting?.patients?.phone ?? "")}`,
-                    { cache: "no-store" }
-                  );
-                  const body = await readJson<{ results?: PatientHit[] }>(res);
-                  const hit = (body?.results ?? []).find((r) => r.id === pid);
-                  if (hit) setPatientDetail(hit);
-                })();
-              }}
-            />
-            <NeedsYouCard
-              density={cockpitDensity}
-              isWorking={isWorking}
-              items={needsYouTop}
-              onDismiss={(id) => setDismissed((d) => new Set(d).add(id))}
-              overflowItems={needsYouOverflow}
-            />
-          </div>
+          <NextCard
+            token={nextWaiting}
+            clinicName={clinic?.name ?? "the clinic"}
+            upcoming={upcomingAfterNext}
+            isWorking={isWorking || Boolean(currentServing)}
+            behind={Math.max(0, waitingList.length - 1)}
+            onCollectPayment={(t) => setPaymentTarget(t)}
+            onOpenInsurance={(t) => setInsuranceTarget(t)}
+            onOpenProximity={(t) => setProximityTarget(t)}
+            onOpenVitals={(t) => setVitalsTarget(t)}
+            onStart={(id) => runAction("start_consultation", id)}
+            onOpenProfile={(pid) => {
+              void (async () => {
+                const res = await fetch(
+                  `/api/patients/search?q=${encodeURIComponent(nextWaiting?.patients?.phone ?? "")}`,
+                  { cache: "no-store" }
+                );
+                const body = await readJson<{ results?: PatientHit[] }>(res);
+                const hit = (body?.results ?? []).find((r) => r.id === pid);
+                if (hit) setPatientDetail(hit);
+              })();
+            }}
+          />
+          <NeedsYouCard
+            isWorking={isWorking}
+            items={needsYouTop}
+            onDismiss={(id) => setDismissed((d) => new Set(d).add(id))}
+            overflowItems={needsYouOverflow}
+          />
         </div>
-        {/* ═══ ARCH STEP 3 — end ═══ */}
 
-        <div className={cn("shrink-0", compactCockpit ? "mt-3" : "mt-4")}>
+        <div className="mt-4 shrink-0">
           <PranaBar
             inputRef={copilotRef}
             value={copilot}
@@ -3400,229 +3311,6 @@ type PatientBrief = {
   unpaidPriorVisits: number;
 };
 
-/* ═══ ARCH STEP 3 — LiveServingRail — start ═══
-   Horizontal persistent rail that replaces the WithDoctor card. During a
-   consult the receptionist can only Done/Hold/Skip — those three actions
-   don't need a full column. The rail keeps "what's live" in persistent
-   ambient view, reclaims column-width for Next-up + Action Center, and
-   opens the full dossier in a modal on demand.
-   The old WithDoctorCard is preserved below but no longer mounted by the
-   cockpit — kept inline so `.prana-savepoint/REVERT.md` can restore it. */
-
-function LiveServingRail({
-  token,
-  clinicName,
-  density,
-  isWorking,
-  onDone,
-  onHold,
-  onSkip
-}: {
-  token: QueueItem | null;
-  clinicName: string;
-  density: CockpitDensity;
-  isWorking: boolean;
-  onDone: (id: string) => void;
-  onHold: () => void;
-  onSkip: (id: string) => void;
-}) {
-  const [dossierOpen, setDossierOpen] = useState(false);
-  const [brief, setBrief] = useState<PatientBrief | null>(null);
-  const [briefLoading, setBriefLoading] = useState(false);
-  const patientId = token?.patient_id ?? null;
-
-  useEffect(() => {
-    setBrief(null);
-    setDossierOpen(false);
-  }, [token?.id]);
-
-  useEffect(() => {
-    if (!patientId) return;
-    let cancelled = false;
-    setBriefLoading(true);
-    (async () => {
-      const res = await fetch(`/api/patients/brief?id=${encodeURIComponent(patientId)}`, {
-        cache: "no-store"
-      });
-      const body = await readJson<PatientBrief & { error?: string }>(res);
-      if (cancelled) return;
-      setBriefLoading(false);
-      if (body && !body.error) setBrief(body);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [patientId]);
-
-  // Empty state — slim passive rail
-  if (!token) {
-    return (
-      <div className="flex items-center gap-3 rounded-[22px] border border-[#E2E8F0] bg-white/85 px-5 py-3 shadow-[0_10px_22px_-18px_rgba(15,23,42,0.16)] backdrop-blur-xl">
-        <span className="relative flex h-2 w-2 items-center justify-center">
-          <span className="h-2 w-2 rounded-full bg-[#CBD5E1]" />
-        </span>
-        <span className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#8B97AD]">
-          With doctor
-        </span>
-        <span className="text-[13px] font-semibold text-[#8B97AD]">
-          Nobody in consultation right now.
-        </span>
-      </div>
-    );
-  }
-
-  const elapsed = minutesSince(token.serving_started_at ?? token.checked_in_at);
-  const complaint = token.raw_complaint?.trim() ?? "";
-  const isStale = Boolean(token.is_stale);
-  const firstName = formatPatientName(token.patients?.name);
-  const meta = patientMeta(token);
-  const compact = density !== "regular";
-
-  return (
-    <>
-      <div
-        className={cn(
-          "flex flex-wrap items-center rounded-[22px] border backdrop-blur-xl transition-colors",
-          compact ? "gap-x-3 gap-y-1.5 px-4 py-2.5" : "gap-x-4 gap-y-2 px-5 py-3",
-          isStale
-            ? "border-[#FDE68A] bg-[#FFFBEB]/90 shadow-[0_10px_22px_-16px_rgba(217,119,6,0.3)]"
-            : "border-[#D1FAE5] bg-white/90 shadow-[0_10px_22px_-18px_rgba(15,23,42,0.18)]"
-        )}
-      >
-        {/* Live indicator + kicker + elapsed (or overdue verify) */}
-        <div className="flex items-center gap-2">
-          {isStale ? (
-            <>
-              <AlertTriangle className="h-3.5 w-3.5 text-[#B45309]" />
-              <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#B45309]">
-                Serving · overdue
-              </span>
-              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#B45309] ring-1 ring-[#FDE68A]">
-                Verify
-              </span>
-            </>
-          ) : (
-            <>
-              <span className="relative flex h-2 w-2 items-center justify-center">
-                <span className="qcare-breathe absolute inset-0 rounded-full bg-[#10B981]" />
-                <span className="absolute h-1.5 w-1.5 rounded-full bg-[#10B981]" />
-              </span>
-              <span className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#047857]">
-                Serving
-              </span>
-              <span className="text-[10px] font-bold uppercase tracking-[0.14em] tabular-nums text-[#047857]">
-                {formatDur(elapsed)}
-              </span>
-            </>
-          )}
-        </div>
-
-        <div className="hidden h-5 w-px bg-[#E2E8F0] sm:block" />
-
-        {/* Name + token chip + meta */}
-        <button
-          className="group flex min-w-0 items-center gap-2 text-left transition"
-          onClick={() => setDossierOpen(true)}
-          title="Show dossier"
-          type="button"
-        >
-          <span
-            className={cn(
-              "truncate font-extrabold text-[#0B1840] group-hover:text-[#047857]",
-              compact ? "text-[14px]" : "text-[15px]"
-            )}
-            title={token.patients?.name ?? undefined}
-          >
-            {firstName}
-          </span>
-          {meta ? (
-            <span className="shrink-0 text-[11px] font-semibold text-[#6A7283]">
-              {meta}
-            </span>
-          ) : null}
-          <span className="shrink-0 rounded-md bg-[#F0FDF4] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] tabular-nums text-[#047857] ring-1 ring-[#BBF7D0]">
-            #{token.token_number}
-          </span>
-          <ChevronRight className="h-3.5 w-3.5 text-[#94A3B8] transition-transform group-hover:translate-x-0.5 group-hover:text-[#047857]" />
-        </button>
-
-        {/* Complaint preview — takes remaining space, truncates */}
-        {complaint ? (
-          <div className="hidden min-w-0 flex-1 items-baseline gap-1.5 md:flex">
-            <span className="shrink-0 text-[9px] font-bold uppercase tracking-[0.18em] text-[#047857]">
-              Here for
-            </span>
-            <span className={cn("truncate font-semibold text-[#1A2550]", compact ? "text-[11px]" : "text-[12px]")}>
-              {complaint}
-            </span>
-          </div>
-        ) : (
-          <div className="hidden flex-1 md:block" />
-        )}
-
-        {/* Actions — compact horizontal trio, matches NextCard's grammar */}
-        <div className="ml-auto flex items-center gap-1.5">
-          <button
-            className="group/cta relative inline-flex items-center justify-center gap-1.5 overflow-hidden rounded-full bg-[linear-gradient(135deg,#10B981_0%,#059669_55%,#047857_100%)] px-4 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-white shadow-[0_8px_20px_-10px_rgba(16,185,129,0.75),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:shadow-[0_14px_28px_-10px_rgba(16,185,129,0.9)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
-            disabled={isWorking}
-            onClick={() => onDone(token.id)}
-            type="button"
-          >
-            <span
-              aria-hidden
-              className="pointer-events-none absolute inset-y-0 -left-full w-1/2 -skew-x-12 bg-[linear-gradient(90deg,transparent_0%,rgba(255,255,255,0.35)_50%,transparent_100%)] transition-transform duration-700 ease-out group-hover/cta:translate-x-[300%]"
-            />
-            <span className="relative z-10">Done · D</span>
-            <ChevronRight
-              aria-hidden
-              className="relative z-10 h-3.5 w-3.5 transition-transform duration-200 ease-out group-hover/cta:translate-x-0.5"
-            />
-          </button>
-          <button
-            className="group/sec inline-flex items-center gap-1.5 rounded-full border border-[#BBF7D0] bg-white/80 px-3.5 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#047857] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:border-[#86EFAC] hover:bg-[#F0FDF4] hover:shadow-[0_10px_20px_-10px_rgba(16,185,129,0.55)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
-            disabled={isWorking}
-            onClick={onHold}
-            type="button"
-          >
-            <PauseCircle className="h-3.5 w-3.5 transition-transform duration-200 group-hover/sec:scale-110" />
-            Hold · H
-          </button>
-          <button
-            className="inline-flex items-center gap-1.5 rounded-full border border-[#FECACA] bg-white/80 px-3.5 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#B91C1C] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:border-[#FCA5A5] hover:bg-[#FFF1F2] hover:shadow-[0_10px_20px_-10px_rgba(220,38,38,0.5)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0"
-            disabled={isWorking}
-            onClick={() => onSkip(token.id)}
-            type="button"
-          >
-            Skip · S
-          </button>
-        </div>
-      </div>
-
-      {/* Dossier modal — replaces the flipped back face */}
-      {dossierOpen ? (
-        <ModalShell accent="emerald" maxWidth="max-w-xl" onClose={() => setDossierOpen(false)}>
-          <ModalHeader
-            kicker="Dossier"
-            kickerColor="#047857"
-            onClose={() => setDossierOpen(false)}
-            subtitle={`With doctor · #${token.token_number}`}
-            title={token.patients?.name ?? "Patient"}
-          />
-          <div className="mt-4">
-            <NextDossierBody
-              brief={brief}
-              clinicName={clinicName}
-              loading={briefLoading}
-              token={token}
-            />
-          </div>
-        </ModalShell>
-      ) : null}
-    </>
-  );
-}
-/* ═══ ARCH STEP 3 — end ═══ */
-
 function WithDoctorCard({
   token,
   clinicName,
@@ -4242,7 +3930,6 @@ function fmtShortDate(iso: string) {
 function NextCard({
   token,
   clinicName,
-  density,
   upcoming,
   isWorking,
   behind,
@@ -4255,7 +3942,6 @@ function NextCard({
 }: {
   token: QueueItem | null;
   clinicName: string;
-  density: CockpitDensity;
   upcoming: QueueItem[];
   isWorking: boolean;
   behind: number;
@@ -4359,31 +4045,6 @@ function NextCard({
   const moreCount = Math.max(0, behind - visibleUpcoming.length);
   const complaint = token.raw_complaint?.trim() ?? "";
   const insight = buildNextInsight(brief);
-  const chips = patientChips(token, new Date());
-  const compact = density !== "regular";
-  const tight = density === "tight";
-  const visibleChips = compact ? chips.slice(0, 1) : chips;
-  const showInsight = density === "regular";
-  const showContact = density === "regular";
-  const showChips = visibleChips.length > 0;
-
-  /* ═══ ARCH STEP 4 — thresholded urgency rail — start ═══
-     Discipline: one urgency signal at a time. When a real threshold is
-     crossed, a left-edge stripe appears AND the regular waited pill
-     retires (replaced by the urgency pill). Never additive — if you see
-     the stripe, the quiet waited pill is gone. */
-  const isStale = Boolean(token.is_stale);
-  const hasRedFlag =
-    Boolean(complaint && RED_FLAG_RE.test(complaint)) && !token.seen_by_doctor;
-  const urgency: "stale" | "red_flag" | "long_wait" | null = isStale
-    ? "stale"
-    : hasRedFlag
-      ? "red_flag"
-      : waited >= 30
-        ? "long_wait"
-        : null;
-  const urgent = urgency !== null;
-  /* ═══ ARCH STEP 4 — end (logic) ═══ */
 
   return (
     <div className="group h-full [perspective:1400px]">
@@ -4401,10 +4062,7 @@ function NextCard({
       >
         {/* FRONT */}
         <div
-          className={cn(
-            "relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#C7D2FE] bg-[linear-gradient(145deg,#EEF2FF_0%,#E0E7FF_55%,#F5F7FF_100%)] shadow-[0_20px_40px_-22px_rgba(79,70,229,0.35)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(79,70,229,0.55)] [backface-visibility:hidden]",
-            compact ? "px-4 py-3.5" : "px-5 py-4"
-          )}
+          className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#C7D2FE] bg-[linear-gradient(145deg,#EEF2FF_0%,#E0E7FF_55%,#F5F7FF_100%)] px-5 py-4 shadow-[0_20px_40px_-22px_rgba(79,70,229,0.35)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_28px_56px_-18px_rgba(79,70,229,0.55)] [backface-visibility:hidden]"
           onPointerLeave={onPointerLeave}
           onPointerMove={onPointerMove}
           ref={frontRef}
@@ -4421,67 +4079,28 @@ function NextCard({
             }}
           />
 
-          {/* ═══ ARCH STEP 4 — urgency rail on the left edge ═══
-              Fires only when a real threshold is crossed. When present, the
-              header's waited pill retires and is replaced by an urgency pill.
-              Never two urgency signals on the same card. */}
-          {urgent ? (
-            <div
-              aria-hidden
-              className="pointer-events-none absolute inset-y-4 left-0 w-[3px] rounded-full"
-              style={{
-                background:
-                  urgency === "red_flag" || urgency === "stale"
-                    ? "linear-gradient(180deg, #DC2626 0%, #EF4444 50%, #FCA5A5 100%)"
-                    : "linear-gradient(180deg, #D97706 0%, #F59E0B 50%, #FDE68A 100%)"
-              }}
-            />
-          ) : null}
-
           <div className="relative z-10 flex h-full min-h-0 flex-col">
             <div className="shrink-0">
-              {/* Header — kicker on left, ONE signal on the right.
-                  Discipline: when urgency fires, the urgency pill replaces
-                  the quiet waited pill (never both). */}
+              {/* Header — kicker on left, waited-time pill on right (urgency signal) */}
               <div className="flex items-center justify-between">
                 <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
                   Next up
                 </p>
-                {urgency === "stale" ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 rounded-full bg-[#FFFBEB] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#B45309] ring-1 ring-[#FDE68A]"
-                    title="Token looks aged-out — verify"
-                  >
-                    <AlertTriangle className="h-3 w-3" />
-                    Overdue · verify
-                  </span>
-                ) : urgency === "red_flag" ? (
-                  <span
-                    className="qcare-breathe inline-flex items-center gap-1.5 rounded-full bg-[#FEE2E2] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#B91C1C] ring-1 ring-[#FECACA]"
-                    title="Possible red-flag complaint — move ahead?"
-                  >
-                    <AlertTriangle className="h-3 w-3" />
-                    Urgent
-                  </span>
-                ) : urgency === "long_wait" ? (
-                  <span
-                    className="inline-flex items-center gap-1.5 rounded-full bg-[#FFFBEB] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#B45309] ring-1 ring-[#FDE68A]"
-                    title={`Checked in ${formatDur(waited)} ago`}
-                  >
-                    <Clock className="h-3 w-3" />
-                    <span>waited {formatDur(waited)}</span>
-                  </span>
-                ) : (
-                  // Quiet baseline — the only state where the waited pill shows
-                  <span
-                    className="inline-flex items-center gap-1.5 rounded-full bg-white/80 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#4F46E5] ring-1 ring-[#C7D2FE]"
-                    title={`Checked in ${formatDur(waited)} ago`}
-                  >
-                    <Clock className="h-3 w-3" />
-                    <span className="opacity-70">waited</span>
-                    <span className="tabular-nums">{formatDur(waited)}</span>
-                  </span>
-                )}
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] ring-1",
+                    waited >= 30
+                      ? "qcare-breathe bg-[#FEE2E2] text-[#B91C1C] ring-[#FECACA]"
+                      : waited >= 15
+                        ? "bg-[#FFFBEB] text-[#B45309] ring-[#FDE68A]"
+                        : "bg-white/80 text-[#4F46E5] ring-[#C7D2FE]"
+                  )}
+                  title={`Checked in ${formatDur(waited)} ago`}
+                >
+                  <Clock className="h-3 w-3" />
+                  <span className="opacity-70">waited</span>
+                  <span className="tabular-nums">{formatDur(waited)}</span>
+                </span>
               </div>
 
               {/* Name as hero — token # + gender/age inline, animated underline on hover */}
@@ -4494,10 +4113,7 @@ function NextCard({
               >
                 <span className="flex min-w-0 flex-1 items-baseline gap-2">
                   <span
-                    className={cn(
-                      "relative min-w-0 truncate font-extrabold leading-[1.1] tracking-[-0.02em] text-[#0B1840] transition-[letter-spacing] duration-300 ease-out group-hover/name:tracking-[-0.025em]",
-                      compact ? "text-[20px]" : "text-[22px]"
-                    )}
+                    className="relative min-w-0 truncate text-[22px] font-extrabold leading-[1.1] tracking-[-0.02em] text-[#0B1840] transition-[letter-spacing] duration-300 ease-out group-hover/name:tracking-[-0.025em]"
                     title={token.patients?.name ?? undefined}
                   >
                     {formatPatientName(token.patients?.name)}
@@ -4546,15 +4162,15 @@ function NextCard({
                 token={token}
               />
 
-              {showChips ? (
-                <div className="mt-1.5 flex flex-wrap items-center gap-1">{visibleChips}</div>
-              ) : null}
+              <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                {patientChips(token, new Date())}
+              </div>
 
               {/* Operational insight — one decision-dense line. Picks the
                   single most-actionable fact about this patient (unpaid prior
                   visit > allergy > first-visit > frequent returner > standard
                   returning). Sparkles-voiced so it reads as Prāṇa speaking. */}
-              {showInsight && insight ? (
+              {insight ? (
                 <div
                   className={cn(
                     "mt-2 flex items-start gap-1.5 rounded-xl border px-2.5 py-1.5",
@@ -4570,15 +4186,14 @@ function NextCard({
                   )}
                   <p
                     className={cn(
-                      "font-semibold leading-snug tracking-[-0.005em]",
-                      compact ? "line-clamp-1 text-[11px]" : "text-[11.5px]",
+                      "text-[11.5px] font-semibold leading-snug tracking-[-0.005em]",
                       insight.tone === "warn" ? "text-[#92400E]" : "text-[#1A2550]"
                     )}
                   >
                     {insight.text}
                   </p>
                 </div>
-              ) : showInsight && briefLoading ? (
+              ) : briefLoading ? (
                 <div className="mt-2 flex items-center gap-1.5 rounded-xl border border-[#EEF0F5] bg-[#F8F9FC] px-2.5 py-1.5">
                   <PranaInlineMark className="shrink-0" size={12} />
                   <p className="text-[11px] font-semibold italic text-[#94A3B8]">
@@ -4587,53 +4202,29 @@ function NextCard({
                 </div>
               ) : null}
 
-              {showContact ? <ContactLine hideMeta token={token} tone="indigo" /> : null}
+              <ContactLine hideMeta token={token} tone="indigo" />
             </div>
 
-            {complaint ? (
-              <div className={cn(compact ? "mt-2 shrink-0" : "mt-3 shrink-0")}>
-                <div
-                  className={cn(
-                    "rounded-2xl border border-white/90 bg-white/85 shadow-[0_10px_24px_-16px_rgba(79,70,229,0.22)] backdrop-blur-sm overflow-hidden",
-                    tight
-                      ? "min-h-[92px] px-3 py-2.5"
-                      : compact
-                        ? "min-h-[116px] px-3 py-2.5"
-                        : "px-4 py-3"
-                  )}
-                >
+            <div
+              className={cn(
+                "min-h-0 flex-1",
+                complaint ? "mt-3 overflow-hidden" : "mt-2"
+              )}
+            >
+              {complaint ? (
+                <div className="rounded-2xl border border-white/90 bg-white/85 px-4 py-3 shadow-[0_10px_24px_-16px_rgba(79,70,229,0.22)] backdrop-blur-sm">
                   <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#4F46E5]">
                     Here for
                   </p>
-                  <p
-                    className={cn(
-                      "mt-1 font-extrabold leading-snug tracking-[-0.01em] text-[#0B1840]",
-                      tight
-                        ? "line-clamp-2 text-[13px]"
-                        : compact
-                          ? "line-clamp-2 text-[14px]"
-                          : "line-clamp-2 text-[15px]"
-                    )}
-                  >
+                  <p className="mt-1 line-clamp-2 text-[15px] font-extrabold leading-snug tracking-[-0.01em] text-[#0B1840]">
                     {complaint}
                   </p>
                 </div>
-              </div>
-            ) : (
-              <div className="min-h-0 flex-1" />
-            )}
-
-            {complaint ? (
-              <div className={cn("min-h-0 flex-1", compact ? "pt-2.5" : "")} />
-            ) : null}
+              ) : null}
+            </div>
 
             {visibleUpcoming.length > 0 ? (
-              <div
-                className={cn(
-                  "mt-auto shrink-0 rounded-2xl border border-white/80 bg-white/70 backdrop-blur-sm",
-                  compact ? "p-2" : "p-2.5"
-                )}
-              >
+              <div className="mt-auto shrink-0 rounded-2xl border border-white/80 bg-white/70 p-2.5 backdrop-blur-sm">
                 <p className="text-[9px] font-bold uppercase tracking-[0.18em] text-[#8B97AD]">
                   Then
                 </p>
@@ -4668,12 +4259,9 @@ function NextCard({
               </p>
             ) : null}
 
-            <div className={cn("shrink-0", compact ? "mt-2.5" : "mt-3")}>
+            <div className="mt-3 shrink-0">
               <button
-                className={cn(
-                  "group/cta relative inline-flex w-full items-center justify-center gap-1.5 overflow-hidden rounded-full bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_55%,#4338CA_100%)] px-5 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_24px_-10px_rgba(79,70,229,0.7),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:shadow-[0_16px_32px_-10px_rgba(79,70,229,0.85),inset_0_1px_0_rgba(255,255,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0",
-                  compact ? "py-2" : "py-2.5"
-                )}
+                className="group/cta relative inline-flex w-full items-center justify-center gap-1.5 overflow-hidden rounded-full bg-[linear-gradient(135deg,#6366F1_0%,#4F46E5_55%,#4338CA_100%)] px-5 py-2.5 text-[11px] font-bold uppercase tracking-[0.16em] text-white shadow-[0_10px_24px_-10px_rgba(79,70,229,0.7),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:shadow-[0_16px_32px_-10px_rgba(79,70,229,0.85),inset_0_1px_0_rgba(255,255,255,0.28)] disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
                 disabled={isWorking}
                 onClick={() => onStart(token.id)}
                 type="button"
@@ -5119,43 +4707,52 @@ function SendTextAction({
 function NeedsYouCard({
   items,
   overflowItems,
-  density,
   isWorking,
   onDismiss
 }: {
   items: NeedsYouEntry[];
   overflowItems: NeedsYouEntry[];
-  density: CockpitDensity;
   isWorking: boolean;
   onDismiss: (id: string) => void;
 }) {
-  const [overflowOpen, setOverflowOpen] = useState(false);
-  const [reviewClassKey, setReviewClassKey] = useState<NeedsYouClassKey | null>(null);
+  const [flipped, setFlipped] = useState(false);
+  const [isFlipping, setIsFlipping] = useState(false);
   const frontRef = useRef<HTMLDivElement>(null);
   const orbRef = useRef<HTMLDivElement>(null);
-  const compact = density !== "regular";
-  const allEntries = useMemo(() => [...items, ...overflowItems], [items, overflowItems]);
-  const totalEntries = allEntries.length;
-  const reviewEntry = useMemo(() => {
-    if (!reviewClassKey) return null;
-    const match = allEntries.find(
-      (entry): entry is Extract<NeedsYouEntry, { kind: "rollup" }> =>
-        entry.kind === "rollup" && entry.classKey === reviewClassKey
-    );
-    return match ?? null;
-  }, [allEntries, reviewClassKey]);
+  const flipMountedRef = useRef(false);
 
+  // When overflow drains to zero, pull the user back to the front automatically.
   useEffect(() => {
-    if (overflowItems.length === 0 && overflowOpen) {
-      setOverflowOpen(false);
-    }
-  }, [overflowItems.length, overflowOpen]);
+    if (overflowItems.length === 0 && flipped) setFlipped(false);
+  }, [overflowItems.length, flipped]);
 
+  // Paper-lift animation on each flip; skip initial mount.
   useEffect(() => {
-    if (reviewClassKey && !reviewEntry) {
-      setReviewClassKey(null);
+    if (!flipMountedRef.current) {
+      flipMountedRef.current = true;
+      return;
     }
-  }, [reviewClassKey, reviewEntry]);
+    setIsFlipping(true);
+    const t = window.setTimeout(() => setIsFlipping(false), 620);
+    return () => window.clearTimeout(t);
+  }, [flipped]);
+
+  // Esc to flip back
+  useEffect(() => {
+    if (!flipped) return;
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const inField =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
+      if (inField) return;
+      if (e.key === "Escape") setFlipped(false);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [flipped]);
 
   // Cursor hologram — violet ambient glow
   function onPointerMove(e: React.PointerEvent<HTMLDivElement>) {
@@ -5173,20 +4770,29 @@ function NeedsYouCard({
   }
 
   return (
-    <>
-      <div className="group h-full [perspective:1400px]">
+    <div className="group h-full [perspective:1400px]">
+      <div
+        className={cn(
+          "h-full transition-transform duration-200 ease-out hover:-translate-y-[2px]",
+          isFlipping && "qcare-flip-lift"
+        )}
+      >
         <div
-          className="h-full transition-transform duration-200 ease-out hover:-translate-y-[2px]"
+          className={cn(
+            "relative h-full [transform-style:preserve-3d] transition-transform duration-[520ms] will-change-transform [transition-timing-function:cubic-bezier(0.4,0,0.2,1)]",
+            flipped && "[transform:rotateY(180deg)]"
+          )}
         >
+          {/* FRONT — top 3 */}
           <div
-            className={cn(
-              "relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E2E8F0] bg-white/88 shadow-[0_16px_36px_-22px_rgba(15,23,42,0.18)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_22px_44px_-18px_rgba(15,23,42,0.26)] [backface-visibility:hidden]",
-              compact ? "px-4 py-3.5" : "px-5 py-4"
-            )}
+            className="relative flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E2E8F0] bg-white/88 px-5 py-4 shadow-[0_16px_36px_-22px_rgba(15,23,42,0.18)] backdrop-blur-xl transition-shadow duration-200 group-hover:shadow-[0_22px_44px_-18px_rgba(15,23,42,0.26)] [backface-visibility:hidden]"
             onPointerLeave={onPointerLeave}
             onPointerMove={onPointerMove}
             ref={frontRef}
           >
+            {/* Priority edge rail — red if any red-severity items are surfaced,
+                otherwise indigo. Gives a quiet container one unmistakable
+                urgency cue without re-colouring the whole panel. */}
             {items.length > 0 ? (
               <div
                 aria-hidden
@@ -5203,6 +4809,7 @@ function NeedsYouCard({
               />
             ) : null}
 
+            {/* Cursor spotlight — indigo now (operating tone) */}
             <div
               aria-hidden
               className="pointer-events-none absolute left-0 top-0 z-0 h-[260px] w-[260px] opacity-0 transition-opacity duration-300 ease-out"
@@ -5224,11 +4831,11 @@ function NeedsYouCard({
                     </p>
                   </div>
                   <span className="rounded-full bg-[#F3F4F6] px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#475569]">
-                    Top {Math.min(3, totalEntries)}
+                    Top {items.length}
                   </span>
                 </div>
 
-                {totalEntries === 0 ? (
+                {items.length === 0 ? (
                   <div className="my-auto flex flex-col items-center gap-1.5 py-6 text-center">
                     <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#DCFCE7] text-[#047857]">
                       <CheckCircle2 className="h-5 w-5" />
@@ -5239,15 +4846,13 @@ function NeedsYouCard({
                     </p>
                   </div>
                 ) : (
-                  <ul className={cn("grid auto-rows-min overflow-hidden", compact ? "mt-2 gap-1.5" : "mt-3 gap-2")}>
+                  <ul className="mt-3 grid auto-rows-min gap-2 overflow-hidden">
                     {items.map((entry) => (
                       <NeedsYouEntryRow
-                        compact={compact}
                         entry={entry}
                         isWorking={isWorking}
                         key={entry.kind === "atomic" ? entry.item.id : `rollup-${entry.classKey}`}
                         onDismiss={onDismiss}
-                        onReviewRollup={(classKey) => setReviewClassKey(classKey)}
                       />
                     ))}
                   </ul>
@@ -5255,21 +4860,25 @@ function NeedsYouCard({
               </div>
 
               {overflowItems.length > 0 ? (
-                <div className={cn("mt-auto shrink-0", compact ? "pt-2.5" : "pt-3")}>
+                <div className="mt-auto shrink-0 pt-3">
                   <button
+                    aria-expanded={flipped}
                     className="group/more flex w-full items-center justify-between rounded-full border border-[#E2E8F0] bg-white/90 px-4 py-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#475569] transition-all duration-200 hover:-translate-y-[0.5px] hover:border-[#C7D2FE] hover:bg-[#F5F7FB] hover:text-[#4F46E5]"
-                    onClick={() => setOverflowOpen(true)}
-                    title="Review the rest"
+                    onClick={() => setFlipped(true)}
+                    title="Show the rest"
                     type="button"
                   >
                     <span>
-                      Review {overflowItems.length} more{" "}
+                      {overflowItems.length} more{" "}
                       {overflowItems.length === 1 ? "action" : "actions"}
                     </span>
                     <ChevronRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover/more:translate-x-0.5" />
                   </button>
                 </div>
-              ) : !compact && items.length > 0 && items.length < 3 ? (
+              ) : items.length > 0 && items.length < 3 ? (
+                /* Intentional empty-state fill: when 1–2 items exist and the
+                   overflow is empty, Prāṇa's voice reframes the quiet space as
+                   monitored calm rather than an unfinished panel. */
                 <div className="mt-auto shrink-0 pt-3">
                   <div className="flex items-start gap-2 rounded-2xl border border-[#EEF0F5] bg-[#F8F9FC]/70 px-3 py-2.5">
                     <PranaInlineMark className="mt-[2px] shrink-0" size={12} />
@@ -5283,52 +4892,82 @@ function NeedsYouCard({
               ) : null}
             </div>
           </div>
+
+          {/* BACK — overflow dossier */}
+          <div className="absolute inset-0 flex h-full flex-col overflow-hidden rounded-[28px] border border-[#E6E8EF] bg-[linear-gradient(180deg,#FDFDFE_0%,#F8F9FC_100%)] px-5 py-4 shadow-[0_18px_34px_-24px_rgba(15,23,42,0.25)] [backface-visibility:hidden] [transform:rotateY(180deg)]">
+            {/* subtle paper grain */}
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-0 opacity-[0.35]"
+              style={{
+                backgroundImage:
+                  "linear-gradient(to right, rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.06) 1px, transparent 1px)",
+                backgroundSize: "22px 22px"
+              }}
+            />
+            <div className="relative flex h-full min-h-0 flex-col">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5">
+                  <PranaInlineMark size={14} />
+                  <p className="text-[10px] font-bold uppercase tracking-[0.22em] text-[#4F46E5]">
+                    Also on your plate
+                  </p>
+                </div>
+                <button
+                  aria-label="Flip back"
+                  className="rounded-full p-1 text-[#8B97AD] hover:bg-[#F5F7FB] hover:text-[#0B1840]"
+                  onClick={() => setFlipped(false)}
+                  type="button"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {flipped ? (
+                <ul
+                  className="mt-3 grid auto-rows-min gap-2 overflow-hidden"
+                  key={`overflow-${overflowItems.length}`}
+                >
+                  {overflowItems.map((entry, i) => (
+                    <div
+                      className="qcare-list-item-in"
+                      key={
+                        entry.kind === "atomic"
+                          ? entry.item.id
+                          : `rollup-${entry.classKey}`
+                      }
+                      style={{ ["--i" as string]: i } as React.CSSProperties}
+                    >
+                      <NeedsYouEntryRow
+                        entry={entry}
+                        isWorking={isWorking}
+                        onDismiss={onDismiss}
+                      />
+                    </div>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </div>
         </div>
       </div>
-      {overflowOpen ? (
-        <ActionCenterEntriesModal
-          entries={overflowItems}
-          isWorking={isWorking}
-          onClose={() => setOverflowOpen(false)}
-          onDismiss={onDismiss}
-          onReviewRollup={(classKey) => {
-            setOverflowOpen(false);
-            setReviewClassKey(classKey);
-          }}
-        />
-      ) : null}
-      {reviewEntry ? (
-        <NeedsYouRollupReviewModal
-          classKey={reviewEntry.classKey}
-          isWorking={isWorking}
-          items={reviewEntry.items}
-          onClose={() => setReviewClassKey(null)}
-          onDismiss={onDismiss}
-          severity={reviewEntry.severity}
-        />
-      ) : null}
-    </>
+    </div>
   );
 }
 
 function NeedsYouRow({
   item,
-  compact,
   isWorking,
-  onDismiss,
-  showDismiss = true
+  onDismiss
 }: {
   item: NeedsYouItem;
-  compact: boolean;
   isWorking: boolean;
   onDismiss: (id: string) => void;
-  showDismiss?: boolean;
 }) {
   return (
     <li
       className={cn(
-        "rounded-2xl border",
-        compact ? "px-3 py-2" : "px-3 py-2.5",
+        "rounded-2xl border px-3 py-2.5",
         item.severity === "red" && "border-[#FECACA] bg-[#FFF1F2]",
         item.severity === "amber" && "border-[#FDE68A] bg-[#FFFBEB]",
         // Info = non-urgent. Keeps the ActionCenter calm when nothing's on fire.
@@ -5345,9 +4984,7 @@ function NeedsYouRow({
       >
         {item.title}
       </p>
-      <p className={cn("mt-0.5 font-medium text-[#5C667D]", compact ? "line-clamp-2 text-[10.5px]" : "text-[11px]")}>
-        {item.detail}
-      </p>
+      <p className="mt-0.5 text-[11px] font-medium text-[#5C667D]">{item.detail}</p>
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
         {item.primary ? (
           <ActionCtaPrimary
@@ -5367,26 +5004,15 @@ function NeedsYouRow({
             {item.secondary.label}
           </ActionCtaSecondary>
         ) : null}
-        {item.tertiary ? (
-          <button
-            className="inline-flex items-center gap-1.5 rounded-full border border-white/70 bg-white/65 px-3.5 py-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-[#5C667D] transition-all duration-200 ease-out hover:-translate-y-[1px] hover:bg-white"
-            onClick={() => void item.tertiary?.run()}
-            type="button"
-          >
-            {item.tertiary.label}
-          </button>
-        ) : null}
-        {showDismiss ? (
-          <button
-            className="ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-[#8B97AD] transition-colors duration-200 hover:bg-white/60 hover:text-[#475569]"
-            onClick={() => onDismiss(item.id)}
-            title="Dismiss"
-            type="button"
-          >
-            <X className="h-3 w-3" />
-            Dismiss
-          </button>
-        ) : null}
+        <button
+          className="ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-[#8B97AD] transition-colors duration-200 hover:bg-white/60 hover:text-[#475569]"
+          onClick={() => onDismiss(item.id)}
+          title="Dismiss"
+          type="button"
+        >
+          <X className="h-3 w-3" />
+          Dismiss
+        </button>
       </div>
     </li>
   );
@@ -5398,21 +5024,16 @@ function NeedsYouRow({
  */
 function NeedsYouEntryRow({
   entry,
-  compact,
   isWorking,
-  onDismiss,
-  onReviewRollup
+  onDismiss
 }: {
   entry: NeedsYouEntry;
-  compact: boolean;
   isWorking: boolean;
   onDismiss: (id: string) => void;
-  onReviewRollup: (classKey: NeedsYouClassKey) => void;
 }) {
   if (entry.kind === "atomic") {
     return (
       <NeedsYouRow
-        compact={compact}
         isWorking={isWorking}
         item={entry.item}
         onDismiss={onDismiss}
@@ -5422,36 +5043,41 @@ function NeedsYouEntryRow({
   return (
     <NeedsYouRollupRow
       classKey={entry.classKey}
-      compact={compact}
       isWorking={isWorking}
       items={entry.items}
-      onReview={() => onReviewRollup(entry.classKey)}
+      onDismiss={onDismiss}
       severity={entry.severity}
     />
   );
 }
 
+/**
+ * Rollup row — collapses a class of repeatable exceptions (SMS failures,
+ * expired holds, etc.) into one summary card. Click to expand; each child
+ * then renders as a compact sub-row with its own primary action. Email-
+ * inbox threading applied to a cockpit: safety stays loud, repetition gets
+ * quieter.
+ */
 function NeedsYouRollupRow({
   classKey,
-  compact,
   severity,
   items,
   isWorking,
-  onReview
+  onDismiss
 }: {
   classKey: NeedsYouClassKey;
-  compact: boolean;
   severity: "red" | "amber" | "info";
   items: NeedsYouItem[];
   isWorking: boolean;
-  onReview: () => void;
+  onDismiss: (id: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
+
   const meta: Record<NeedsYouClassKey, { label: string; verb: string }> = {
     sms_failed: { label: "SMS failures", verb: "confirmation didn't deliver" },
     hold_expired: { label: "Expired holds", verb: "past their hold window" },
     hold_active: { label: "Active holds", verb: "currently on hold" },
-    held_mid_consult: { label: "Held mid-consult", verb: "paused during consult" },
-    stale_token: { label: "Stale tokens", verb: "likely left silently — close out?" }
+    held_mid_consult: { label: "Held mid-consult", verb: "paused during consult" }
   };
   const classMeta = meta[classKey];
   const count = items.length;
@@ -5464,22 +5090,21 @@ function NeedsYouRollupRow({
   return (
     <li
       className={cn(
-        "rounded-2xl border px-3",
-        compact ? "py-2" : "py-2.5",
+        "rounded-2xl border",
         severity === "red" && "border-[#FECACA] bg-[#FFF1F2]",
         severity === "amber" && "border-[#FDE68A] bg-[#FFFBEB]",
         severity === "info" && "border-[#E2E8F0] bg-[#F8FAFC]"
       )}
     >
-      <div
-        className={cn(
-          "flex min-w-0 w-full text-left",
-          compact ? "flex-col items-start gap-2" : "items-center gap-2"
-        )}
+      <button
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-black/[0.02]"
+        onClick={() => setOpen((o) => !o)}
+        type="button"
       >
         <span
           className={cn(
-            "inline-flex h-6 min-w-[28px] shrink-0 items-center justify-center rounded-full px-2 text-[10px] font-bold tabular-nums",
+            "inline-flex h-6 min-w-[28px] items-center justify-center rounded-full px-2 text-[10px] font-bold tabular-nums",
             severity === "red" && "bg-[#B91C1C] text-white",
             severity === "amber" && "bg-[#B45309] text-white",
             severity === "info" && "bg-[#1A2550] text-white"
@@ -5490,9 +5115,7 @@ function NeedsYouRollupRow({
         <div className="min-w-0 flex-1">
           <p
             className={cn(
-              compact
-                ? "truncate text-[12px] font-bold leading-snug capitalize"
-                : "truncate text-[13px] font-bold leading-snug capitalize",
+              "truncate text-[13px] font-bold leading-snug capitalize",
               severity === "red" && "text-[#B91C1C]",
               severity === "amber" && "text-[#B45309]",
               severity === "info" && "text-[#1A2550]"
@@ -5500,177 +5123,66 @@ function NeedsYouRollupRow({
           >
             {title}
           </p>
-          <p className={cn("truncate font-medium text-[#5C667D]", compact ? "text-[10.5px]" : "text-[11px]")}>
+          <p className="truncate text-[11px] font-medium text-[#5C667D]">
             {detail} · {classMeta.verb}
           </p>
         </div>
-        <div className={cn("shrink-0", compact && "self-end")}>
-          <ActionCtaSecondary disabled={isWorking} onClick={onReview} severity={severity}>
-            Review
-          </ActionCtaSecondary>
-        </div>
-      </div>
-    </li>
-  );
-}
+        <ChevronDown
+          aria-hidden
+          className={cn(
+            "h-4 w-4 shrink-0 text-[#8B97AD] transition-transform duration-200",
+            open && "rotate-180"
+          )}
+        />
+      </button>
 
-function ActionCenterEntriesModal({
-  entries,
-  isWorking,
-  onClose,
-  onDismiss,
-  onReviewRollup
-}: {
-  entries: NeedsYouEntry[];
-  isWorking: boolean;
-  onClose: () => void;
-  onDismiss: (id: string) => void;
-  onReviewRollup: (classKey: NeedsYouClassKey) => void;
-}) {
-  return (
-    <ModalShell accent="indigo" maxWidth="max-w-[920px]" onClose={onClose}>
-      <ModalHeader
-        kicker="Also on your plate"
-        kickerColor="#4F46E5"
-        onClose={onClose}
-        subtitle={`${entries.length} more operational ${
-          entries.length === 1 ? "item" : "items"
-        } ready for review.`}
-        title="Queue exceptions"
-      />
-
-      <div
-        className={cn(
-          "mt-6",
-          entries.length >= 5 && "qcare-scroll max-h-[60vh] overflow-y-auto pr-1"
-        )}
-      >
-        <ul className="grid gap-3">
-          {entries.map((entry, i) => (
-            <div
-              className="qcare-list-item-in"
-              key={entry.kind === "atomic" ? entry.item.id : `rollup-${entry.classKey}`}
-              style={{ ["--i" as string]: i } as React.CSSProperties}
-            >
-              <NeedsYouEntryRow
-                compact={false}
-                entry={entry}
-                isWorking={isWorking}
-                onDismiss={onDismiss}
-                onReviewRollup={onReviewRollup}
-              />
-            </div>
-          ))}
-        </ul>
-      </div>
-    </ModalShell>
-  );
-}
-
-function NeedsYouRollupReviewModal({
-  classKey,
-  severity,
-  items,
-  isWorking,
-  onClose,
-  onDismiss
-}: {
-  classKey: NeedsYouClassKey;
-  severity: "red" | "amber" | "info";
-  items: NeedsYouItem[];
-  isWorking: boolean;
-  onClose: () => void;
-  onDismiss: (id: string) => void;
-}) {
-  const meta: Record<
-    NeedsYouClassKey,
-    { kicker: string; kickerColor: string; accent: ModalAccent; title: string; hint: string }
-  > = {
-    sms_failed: {
-      kicker: "Delivery review",
-      kickerColor: "#B45309",
-      accent: "amber",
-      title: "SMS failures",
-      hint:
-        "Call these patients or resend manually from reception. The front card stays quiet until you decide what to do."
-    },
-    hold_expired: {
-      kicker: "Hold review",
-      kickerColor: "#B45309",
-      accent: "amber",
-      title: "Expired holds",
-      hint:
-        "These hold windows have ended. Return them to waiting if the patient is back, otherwise clear the token."
-    },
-    hold_active: {
-      kicker: "Hold review",
-      kickerColor: "#4F46E5",
-      accent: "indigo",
-      title: "Active holds",
-      hint:
-        "These patients are still on hold. Use this review surface only if reception needs to intervene early."
-    },
-    held_mid_consult: {
-      kicker: "Consult review",
-      kickerColor: "#B45309",
-      accent: "amber",
-      title: "Held mid-consult",
-      hint:
-        "These consults were interrupted mid-stream. Resume them first when the doctor or patient is ready."
-    },
-    stale_token: {
-      kicker: "Stale token review",
-      kickerColor: "#B45309",
-      accent: "amber",
-      title: "Possible stale tokens",
-      hint:
-        "Close a token only after reception confirms the patient is gone. Rejoin queue if they are physically back in clinic."
-    }
-  };
-  const reviewMeta = meta[classKey];
-
-  return (
-    <ModalShell accent={reviewMeta.accent} maxWidth="max-w-[980px]" onClose={onClose}>
-      <ModalHeader
-        kicker={reviewMeta.kicker}
-        kickerColor={reviewMeta.kickerColor}
-        onClose={onClose}
-        subtitle={`${items.length} ${
-          items.length === 1 ? "patient" : "patients"
-        } need a decision.`}
-        title={reviewMeta.title}
-      />
-
-      <div className="mt-5 rounded-[24px] border border-[#E8ECF4] bg-white/85 px-4 py-3 shadow-[0_12px_28px_-22px_rgba(15,23,42,0.2)]">
-        <p className="text-[12px] font-semibold leading-relaxed text-[#5C667D]">
-          {reviewMeta.hint}
-        </p>
-      </div>
-
-      <div
-        className={cn(
-          "mt-5",
-          items.length >= 4 && "qcare-scroll max-h-[56vh] overflow-y-auto pr-1"
-        )}
-      >
-        <ul className="grid gap-3">
+      {open ? (
+        <ul className="grid gap-1.5 border-t border-black/[0.05] px-2 pb-2 pt-2">
           {items.map((item, i) => (
-            <div
-              className="qcare-list-item-in"
+            <li
+              className="qcare-list-item-in rounded-xl bg-white/70 px-3 py-2"
               key={item.id}
               style={{ ["--i" as string]: i } as React.CSSProperties}
             >
-              <NeedsYouRow
-                compact={false}
-                isWorking={isWorking}
-                item={item}
-                onDismiss={onDismiss}
-              />
-            </div>
+              <p className="truncate text-[12px] font-bold text-[#1A2550]">
+                {item.patientLabel ?? item.title}
+              </p>
+              <p className="mt-0.5 truncate text-[11px] font-medium text-[#5C667D]">
+                {item.detail}
+              </p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                {item.primary ? (
+                  <ActionCtaPrimary
+                    disabled={isWorking}
+                    onClick={() => void item.primary?.run()}
+                    severity={severity}
+                  >
+                    {item.primary.label}
+                  </ActionCtaPrimary>
+                ) : null}
+                {item.secondary ? (
+                  <ActionCtaSecondary
+                    disabled={isWorking}
+                    onClick={() => void item.secondary?.run()}
+                    severity={severity}
+                  >
+                    {item.secondary.label}
+                  </ActionCtaSecondary>
+                ) : null}
+                <button
+                  className="ml-auto inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.14em] text-[#8B97AD] transition-colors duration-200 hover:bg-black/5 hover:text-[#475569]"
+                  onClick={() => onDismiss(item.id)}
+                  title="Dismiss"
+                  type="button"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            </li>
           ))}
         </ul>
-      </div>
-    </ModalShell>
+      ) : null}
+    </li>
   );
 }
 

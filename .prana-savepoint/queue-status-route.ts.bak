@@ -261,28 +261,6 @@ export async function GET(request: Request) {
     });
   }
 
-  /* ═══ ARCH STEP 1 — stale-token detection — start ═══ */
-  // A token is "stale" when it's active (waiting/serving/stepped_out) but
-  // obviously aged out: either still dated before today, or checked_in_at is
-  // >12h in the past. Surfaces the case where a receptionist walked away
-  // without closing out, system clock drifted, or a patient left silently.
-  // Downstream: the UI quarantines the card and Prāṇa offers to close-out.
-  const STALE_THRESHOLD_HOURS = 12;
-  const todayIso = new Date().toISOString().slice(0, 10);
-  function isTokenStale(row: RawQueueTokenRow): boolean {
-    const active =
-      row.status === "waiting" ||
-      row.status === "serving" ||
-      row.status === "stepped_out";
-    if (!active) return false;
-    if (row.date && row.date < todayIso) return true;
-    const checkedIn = row.checked_in_at ? new Date(row.checked_in_at) : null;
-    if (!checkedIn) return false;
-    const ageHours = (Date.now() - checkedIn.getTime()) / 3_600_000;
-    return ageHours >= STALE_THRESHOLD_HOURS;
-  }
-  /* ═══ ARCH STEP 1 — end ═══ */
-
   const queue = queueRaw.map((item) => ({
     ...item,
     patients: unwrapRelation(item.patients),
@@ -293,8 +271,7 @@ export async function GET(request: Request) {
       item.status === "stepped_out"
         ? heldFromState.get(item.id) ?? null
         : null,
-    seen_by_doctor: seenByDoctor.has(item.id),
-    is_stale: isTokenStale(item)
+    seen_by_doctor: seenByDoctor.has(item.id)
   }));
   const summary = queue.reduce(
     (accumulator, item) => {

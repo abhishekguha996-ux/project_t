@@ -15,6 +15,9 @@ const checkinSchema = z.object({
   checkinChannel: z.enum(["qr", "reception"]),
   age: z.number().int().min(0).max(130).optional(),
   gender: z.enum(["male", "female", "other"]).optional(),
+  pregnancyStatus: z
+    .enum(["unknown", "pregnant", "not_pregnant", "prefer_not_to_say"])
+    .optional(),
   allergies: z.array(z.string().trim().min(1).max(50)).optional(),
   languagePreference: z.string().trim().min(2).max(20).optional()
 });
@@ -116,6 +119,7 @@ export async function POST(request: Request) {
         name: patientName,
         age: payload.age ?? null,
         gender: payload.gender ?? null,
+        pregnancy_status: payload.pregnancyStatus ?? "unknown",
         allergies: normalizeAllergies(payload.allergies) ?? null,
         language_preference: payload.languagePreference?.trim() || "en"
       })
@@ -140,6 +144,13 @@ export async function POST(request: Request) {
 
     if (payload.gender !== undefined && payload.gender !== patient.gender) {
       patch.gender = payload.gender;
+    }
+
+    if (
+      payload.pregnancyStatus !== undefined &&
+      payload.pregnancyStatus !== patient.pregnancy_status
+    ) {
+      patch.pregnancy_status = payload.pregnancyStatus;
     }
 
     if (payload.languagePreference) {

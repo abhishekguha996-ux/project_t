@@ -23,6 +23,7 @@ const queueActionSchema = z.object({
     "start_consultation",
     "mark_consultation_done",
     "skip",
+    "close_inactive",
     "hold_slot",
     "return_to_waiting"
   ]),
@@ -125,7 +126,7 @@ export async function POST(request: Request) {
       tokenId: parsed.data.tokenId,
       actor
     });
-  } else if (parsed.data.action === "skip") {
+  } else if (parsed.data.action === "skip" || parsed.data.action === "close_inactive") {
     result = await transitionQueueToken({
       supabase,
       scope,

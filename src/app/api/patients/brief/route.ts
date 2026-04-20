@@ -23,7 +23,9 @@ export async function GET(request: Request) {
 
   const { data: patient } = await supabase
     .from("patients")
-    .select("id, name, phone, age, gender, language_preference, allergies, created_at")
+    .select(
+      "id, name, phone, age, gender, pregnancy_status, language_preference, allergies, created_at"
+    )
     .eq("id", patientId)
     .eq("clinic_id", user.clinicId)
     .maybeSingle();
@@ -38,6 +40,11 @@ export async function GET(request: Request) {
     phone: string;
     age: number | null;
     gender: "male" | "female" | "other" | null;
+    pregnancy_status:
+      | "unknown"
+      | "pregnant"
+      | "not_pregnant"
+      | "prefer_not_to_say";
     language_preference: string | null;
     allergies: string[] | null;
     created_at: string | null;
@@ -182,6 +189,7 @@ export async function GET(request: Request) {
       phone: p.phone,
       age: p.age,
       gender: p.gender,
+      pregnancy_status: p.pregnancy_status,
       language_preference: p.language_preference,
       allergies: p.allergies ?? [],
       created_at: p.created_at,

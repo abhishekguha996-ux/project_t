@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { saveLastTokenSnapshot } from "@/lib/patient/last-token-storage";
+import type { PatientPregnancyStatus } from "@/lib/utils/types";
 
 type CheckinDoctor = {
   id: string;
@@ -25,6 +26,7 @@ type CheckinPayload = {
   checkinChannel: CheckinFormMode;
   age?: number;
   gender?: "male" | "female" | "other";
+  pregnancyStatus?: PatientPregnancyStatus;
   allergies?: string[];
   languagePreference?: string;
 };
@@ -74,6 +76,8 @@ export function CheckinForm({
   const [complaint, setComplaint] = useState("");
   const [age, setAge] = useState("");
   const [gender, setGender] = useState<"" | "male" | "female" | "other">("");
+  const [pregnancyStatus, setPregnancyStatus] =
+    useState<PatientPregnancyStatus>("unknown");
   const [allergies, setAllergies] = useState("");
   const [languagePreference, setLanguagePreference] = useState("en");
   const [household, setHousehold] = useState<Array<{ id: string; name: string }>>(
@@ -148,6 +152,10 @@ export function CheckinForm({
 
     if (gender) {
       payload.gender = gender;
+    }
+
+    if (mode === "reception") {
+      payload.pregnancyStatus = pregnancyStatus;
     }
 
     if (languagePreference.trim()) {
@@ -317,6 +325,24 @@ export function CheckinForm({
                 </select>
               </label>
             </div>
+
+            {mode === "reception" ? (
+              <label className="grid gap-2 text-sm">
+                <span className="font-medium">Pregnancy status</span>
+                <select
+                  className="h-11 rounded-xl border border-input bg-white px-3 text-[13px]"
+                  onChange={(event) =>
+                    setPregnancyStatus(event.target.value as PatientPregnancyStatus)
+                  }
+                  value={pregnancyStatus}
+                >
+                  <option value="unknown">Unknown</option>
+                  <option value="pregnant">Pregnant</option>
+                  <option value="not_pregnant">Not pregnant</option>
+                  <option value="prefer_not_to_say">Prefer not to say</option>
+                </select>
+              </label>
+            ) : null}
 
             <label className="grid gap-2 text-sm">
               <span className="font-medium">Allergies (optional)</span>
