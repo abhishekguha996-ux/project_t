@@ -1,0 +1,13 @@
+{
+  "jobs": [
+    {
+      "name": "receptionist",
+      "watch": "/Users/REPLACE_ME/Library/Mobile Documents/com~apple~CloudDocs/qcare/receptionist.html",
+      "target": "receptionist_ui.html",
+      "output": ".ui_previews/receptionist.png",
+      "sendTelegram": true,
+      "fullPage": false
+    }
+  ]
+}
+

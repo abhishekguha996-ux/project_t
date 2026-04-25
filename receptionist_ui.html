@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qcare Receptionist | Contextual Checkout Pro</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        /* --- 1. DESIGN SYSTEM VARIABLES --- */
+        :root {
+            --bg-base: #FAFAFB;
+            --surface: #FFFFFF;
+            --text-dark: #0D1117;
+            --text-muted: #8A909F;
+            --accent-blue: #007AFF; 
+            --accent-green: #34C759; 
+            --system-amber: #FF9F0A;
+            --system-red: #FF3B30; 
+            --system-gray: #F2F2F7; 
+            --btn-dark: #11141A;
+            --shadow-soft: 0 12px 32px rgba(0, 0, 0, 0.04);
+            --shadow-float: 0 20px 48px rgba(0, 0, 0, 0.08), 0 4px 12px rgba(0,0,0,0.02);
+            --border-radius: 24px;
+            --divider: #EBECEF;
+        }
+
+        /* --- 2. GLOBAL RESET & LAYOUT --- */
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: var(--bg-base); 
+            color: var(--text-dark); 
+            margin: 0; 
+            padding: 100px 40px 40px 40px; 
+            display: flex; 
+            flex-direction: column;
+            align-items: center;
+            height: 100vh; 
+            box-sizing: border-box; 
+            -webkit-font-smoothing: antialiased; 
+            -moz-osx-font-smoothing: grayscale;
+            overflow: hidden; 
+        }
+
+        .bg-glow { 
+            position: absolute; top: 40%; left: 30%; transform: translate(-50%, -50%); 
+            width: 800px; height: 800px; 
+            background: radial-gradient(circle, rgba(52, 199, 89, 0.05) 0%, rgba(250, 250, 251, 0) 70%); 
+            z-index: -1; pointer-events: none; 
+        }
+
+        .workspace { 
+            display: flex; width: 100%; max-width: 1500px; gap: 40px; 
+            justify-content: center; position: relative;
+        }
+        
+        .col-inbox { flex: 0 0 300px; display: flex; flex-direction: column; }
+        .col-desk { flex: 1; max-width: 600px; display: flex; flex-direction: column; position: relative; }
+        .col-outbox { flex: 0 0 340px; display: flex; flex-direction: column; gap: 20px; }
+
+        /* --- 3. TYPOGRAPHY --- */
+        .column-header { font-size: 0.7rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; }
+        .overline { font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+        .title-massive { font-size: 3rem; font-weight: 800; letter-spacing: -0.04em; margin: 0 0 4px 0; line-height: 1.1; color: var(--text-dark); }
+        .subtitle { font-size: 0.95rem; color: var(--text-muted); font-weight: 500; }
+        .hidden { display: none !important; }
+
+        /* --- 4. GLOBAL NAVIGATION --- */
+        .global-nav { position: absolute; top: 32px; left: 50px; right: 50px; display: flex; justify-content: space-between; align-items: center; width: calc(100% - 100px); max-width: 1500px; margin: 0 auto; z-index: 10; }
+        .nav-left { display: flex; align-items: center; gap: 20px; }
+        .dropdown-filter { display: flex; align-items: center; gap: 8px; font-size: 0.95rem; font-weight: 700; cursor: pointer; color: var(--text-dark); }
+        .vertical-divider { width: 1px; height: 16px; background: var(--divider); }
+        .btn-ghost { display: flex; align-items: center; gap: 6px; background: transparent; border: none; color: var(--text-muted); font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: color 0.2s; padding: 0; }
+        .btn-ghost:hover { color: var(--text-dark); }
+
+        /* --- 5. SEARCH, TABS & INBOX LIST --- */
+        .segmented-control { display: flex; background: var(--system-gray); padding: 4px; border-radius: 14px; gap: 4px; width: 100%; margin-bottom: 24px; box-sizing: border-box;}
+        .segment-btn { flex: 1; border: none; background: transparent; padding: 8px 12px; border-radius: 10px; font-size: 0.8rem; font-weight: 700; color: var(--text-muted); cursor: pointer; transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        .segment-btn.active { background: var(--surface); color: var(--text-dark); box-shadow: 0 4px 12px rgba(0,0,0,0.04), 0 1px 2px rgba(0,0,0,0.02); }
+
+        .local-search { display: flex; align-items: center; background: var(--system-gray); border-radius: 14px; padding: 12px 16px; margin-bottom: 24px; transition: all 0.2s; border: 1px solid transparent; }
+        .local-search:focus-within { background: var(--surface); border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1); }
+        .local-search input { border: none; background: transparent; outline: none; margin-left: 10px; width: 100%; font-family: inherit; font-size: 0.9rem; font-weight: 500; color: var(--text-dark); }
+        .local-search input::placeholder { color: #A1A1A6; }
+        .search-shortcut { font-size: 0.65rem; color: var(--text-muted); font-weight: 700; background: #E5E5EA; padding: 4px 6px; border-radius: 6px; }
+
+        .list-item { display: flex; align-items: center; padding: 16px 0; border-radius: 16px; gap: 12px; transition: all 0.2s ease; cursor: pointer; position: relative; border-bottom: 1px solid var(--divider); padding-left: 16px; padding-right: 16px; margin-bottom: 4px;}
+        .list-item:hover { background: rgba(0,0,0,0.02); border-bottom-color: transparent; }
+        .list-item.selected { background: var(--surface); box-shadow: 0 4px 12px rgba(0,0,0,0.04); border-bottom-color: transparent;}
+        .list-item.completed { opacity: 0.4; filter: grayscale(1); pointer-events: none; border-bottom-color: transparent; }
+        
+        .time-block { width: 45px; font-weight: 600; font-size: 0.85rem; color: var(--text-muted); text-align: right; }
+        
+        .hover-action { position: absolute; right: 0; opacity: 0; visibility: hidden; background: linear-gradient(90deg, rgba(250,250,251,0) 0%, var(--bg-base) 15%); padding-left: 16px; height: 100%; display: flex; align-items: center; transition: all 0.2s ease; border-radius: 0 16px 16px 0;}
+        .list-item:not(.completed):hover .hover-action { opacity: 1; visibility: visible; }
+        .btn-pill-small { background: var(--surface); border: 1px solid var(--divider); color: var(--text-dark); font-weight: 700; font-size: 0.75rem; cursor: pointer; padding: 6px 14px; border-radius: 50px; box-shadow: 0 2px 8px rgba(0,0,0,0.02); transition: all 0.2s; }
+        .btn-pill-small:hover { border-color: #C7C7CC; }
+
+        /* Transition Divider */
+        .done-divider { border-top: 1px solid var(--divider); margin: 24px 0 16px 0; position: relative; display: none;}
+        .done-divider.visible { display: block; }
+        .done-divider::after { content: 'Completed Today'; position: absolute; top: -8px; left: 50%; transform: translateX(-50%); background: var(--bg-base); padding: 0 10px; font-size: 0.65rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; }
+
+        /* --- 6. DESK CARDS & CHECKOUT UI --- */
+        .card { background: var(--surface); border-radius: var(--border-radius); padding: 40px; box-shadow: var(--shadow-soft); position: relative; width: 100%; box-sizing: border-box; transition: all 0.3s;}
+        .card-small { background: var(--surface); border-radius: 20px; padding: 24px; box-shadow: var(--shadow-soft); border: 1px solid rgba(0,0,0,0.01); }
+
+        .tag-group { display: flex; gap: 8px; margin-top: 16px; align-items: center; flex-wrap: wrap; }
+        .badge { padding: 6px 12px; border-radius: 8px; font-size: 0.75rem; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+        .badge-info { background: var(--system-gray); color: var(--text-dark); }
+        .badge-blue { background: rgba(0, 122, 255, 0.1); color: var(--accent-blue); padding: 4px 8px; font-size: 0.65rem; border-radius: 6px; font-weight: 800; text-transform: uppercase; }
+
+        .btn-primary { background: var(--btn-dark); color: white; border: none; width: 100%; padding: 18px; border-radius: 16px; font-size: 0.85rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer; transition: transform 0.1s; margin-top: 24px;}
+        .btn-primary:active { transform: scale(0.98); }
+        
+        .btn-secondary { background: transparent; color: var(--text-dark); border: 1px solid var(--divider); width: 100%; padding: 16px; border-radius: 16px; font-size: 0.85rem; font-weight: 700; cursor: pointer; margin-top: 12px; transition: background 0.2s; }
+        .btn-secondary:hover { background: var(--system-gray); }
+
+        .section-label { font-size: 0.65rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin: 24px 0 12px 0; display: block; }
+        .order-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--divider); font-size: 0.95rem; font-weight: 600; color: var(--text-dark);}
+        .order-row:last-child { border: none; }
+
+        .action-links { display: flex; justify-content: center; gap: 32px; margin-top: 24px; }
+        .link-subtle { display: flex; align-items: center; gap: 8px; font-size: 0.75rem; font-weight: 700; color: var(--text-muted); cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; transition: color 0.2s; }
+        .link-subtle:hover { color: var(--text-dark); }
+        .link-subtle svg { width: 16px; height: 16px; fill: currentColor; }
+
+        /* --- 7. PREMIUM VITALS WELLS --- */
+        .vitals-grid { display: grid; grid-template-columns: 1fr 1fr 1.4fr 1fr 1fr; gap: 12px; margin: 32px 0; border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider); padding: 24px 0; }
+        .vital-input-group { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: 100%; }
+        .vital-well { background: var(--system-gray); border-radius: 12px; padding: 12px 14px; display: flex; align-items: center; gap: 4px; border: 1px solid transparent; transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1); cursor: text; width: 100%; box-sizing: border-box; }
+        .vital-well:focus-within { background: var(--surface); border-color: var(--accent-blue); box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.1); transform: translateY(-1px); }
+        .vital-input { border: none; font-size: 1.2rem; font-weight: 700; color: var(--text-dark); width: 100%; outline: none; background: transparent; padding: 0; }
+        .vital-input::placeholder { color: #C7C7CC; font-weight: 500; }
+        .vital-unit { font-size: 0.7rem; font-weight: 600; color: var(--text-muted); pointer-events: none; }
+
+        /* --- 8. THE HANDOFF CARD & OUTBOX --- */
+        .handoff-card { background: var(--surface); border-radius: 20px; padding: 24px; box-shadow: var(--shadow-float); border: 1px solid rgba(0, 0, 0, 0.03); position: relative; margin-bottom: 20px; }
+        
+        .pulse-dot { width: 8px; height: 8px; background: var(--accent-blue); border-radius: 50%; display: inline-block; animation: pulse-dot-anim 2s infinite cubic-bezier(0.4, 0, 0.6, 1); }
+        @keyframes pulse-dot-anim { 0% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.3); } 70% { box-shadow: 0 0 0 6px rgba(0, 122, 255, 0); } 100% { box-shadow: 0 0 0 0 rgba(0, 122, 255, 0); } }
+
+        .handoff-actions { display: flex; gap: 12px; margin-top: 20px; }
+        .btn-confirm { background: var(--btn-dark); color: white; border: none; padding: 12px 16px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; flex: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: transform 0.1s; }
+        .btn-confirm:active { transform: scale(0.96); }
+        .btn-skip { background: var(--system-gray); color: var(--text-dark); border: none; padding: 12px 20px; border-radius: 12px; font-size: 0.85rem; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.2s; }
+        .btn-skip:hover { background: rgba(255, 59, 48, 0.1); color: var(--system-red); }
+        .btn-skip:active { transform: scale(0.96); }
+
+        .inert-patient-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--divider); }
+        .inert-patient-row:last-child { border: none; }
+        .avatar { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.9rem; flex-shrink: 0;}
+
+        /* --- 9. GLASSMORPHIC MODAL OVERLAY --- */
+        .modal-backdrop {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(13, 17, 23, 0.2); 
+            backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+            z-index: 1000; display: flex; align-items: center; justify-content: center;
+            opacity: 0; visibility: hidden; 
+            transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }
+        .modal-backdrop.active { opacity: 1; visibility: visible; }
+        
+        .modal-container {
+            background: var(--surface); width: 100%; max-width: 440px; border-radius: 24px;
+            box-shadow: var(--shadow-float); transform: scale(0.95) translateY(20px);
+            transition: all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+            display: flex; flex-direction: column; max-height: 85vh; overflow: hidden;
+        }
+        .modal-backdrop.active .modal-container { transform: scale(1) translateY(0); }
+
+        .modal-header {
+            padding: 24px 24px 16px 24px; display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid var(--divider);
+        }
+        .btn-close {
+            background: var(--system-gray); border: none; width: 32px; height: 32px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--text-muted);
+            transition: all 0.2s;
+        }
+        .btn-close:hover { background: #E5E5EA; color: var(--text-dark); }
+
+        /* --- 10. MODAL INTERACTIVE ROWS --- */
+        .modal-list { 
+            padding: 8px 16px 24px 16px; overflow-y: auto; max-height: 400px;
+            mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
+            -webkit-mask-image: linear-gradient(to bottom, black 85%, transparent 100%);
+        }
+
+        .modal-patient-row { 
+            display: flex; align-items: center; justify-content: space-between; 
+            padding: 12px; border-radius: 14px; transition: background 0.2s; 
+            cursor: pointer; margin-bottom: 4px;
+        }
+        .modal-patient-row:hover { background: var(--system-gray); }
+
+        .patient-info-group { display: flex; align-items: center; gap: 12px; }
+
+        .btn-override {
+            background: var(--btn-dark); color: white; border: none; 
+            padding: 8px 16px; border-radius: 50px; 
+            font-size: 0.75rem; font-weight: 700; cursor: pointer; 
+            opacity: 0; transform: translateX(10px); 
+            transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .modal-patient-row:hover .btn-override { opacity: 1; transform: translateX(0); }
+        .btn-override:active { transform: scale(0.95); }
+
+        .trigger-more { 
+            margin-top: 16px; font-size: 0.75rem; font-weight: 700; color: var(--text-muted); 
+            cursor: pointer; display: inline-block; transition: color 0.2s; 
+        }
+        .trigger-more:hover { color: var(--text-dark); }
+    </style>
+</head>
+<body>
+
+    <div class="bg-glow"></div>
+
+    <header class="global-nav">
+        <div class="nav-left">
+            <div class="dropdown-filter">
+                Dr. Ravi Kumar
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </div>
+            <div class="vertical-divider"></div>
+            <button class="btn-ghost">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>
+                Pause Queue
+            </button>
+        </div>
+    </header>
+
+    <main class="workspace">
+        
+        <div class="col-inbox">
+            <div class="column-header">
+                <span>Lobby / Upcoming</span>
+                <span style="color: var(--text-dark); background: var(--system-gray); padding: 4px 10px; border-radius: 50px;">20</span>
+            </div>
+
+            <div class="segmented-control">
+                <button class="segment-btn active" id="tab-arriving">Arriving</button>
+                <button class="segment-btn" id="tab-departing">Departing</button>
+            </div>
+
+            <div class="local-search" id="inbox-search-bar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input type="text" placeholder="Search Waitlist...">
+                <span class="search-shortcut">⌘K</span>
+            </div>
+            
+            <div id="list-arriving">
+                <div class="list-item" style="padding-left: 0; padding-right: 0; border-radius: 0;">
+                    <div class="time-block">12:25</div>
+                    <div>
+                        <div style="font-weight: 700; display: flex; align-items: center; gap: 6px; color: var(--text-dark);">
+                            Aravind Swamy
+                            <span style="width: 6px; height: 6px; background: var(--accent-blue); border-radius: 50%; display: inline-block;"></span>
+                        </div>
+                        <div class="subtitle" style="font-size: 0.8rem; margin-top: 2px;">Token #82</div>
+                    </div>
+                    <div class="hover-action" style="border-radius: 0;"><button class="btn-pill-small">Check In</button></div>
+                </div>
+
+                <div class="list-item" style="padding-left: 0; padding-right: 0; border-radius: 0;">
+                    <div class="time-block">12:40</div>
+                    <div>
+                        <div style="font-weight: 700; color: var(--text-dark);">Maya Patel</div>
+                        <div class="subtitle" style="font-size: 0.8rem; margin-top: 2px;">Token #83</div>
+                    </div>
+                    <div class="hover-action" style="border-radius: 0;"><button class="btn-pill-small">Check In</button></div>
+                </div>
+            </div>
+
+            <div id="list-departing" class="hidden">
+                <div id="active-departing-container">
+                    
+                    <div class="list-item patient-row" id="patient-amit" data-type="labs">
+                        <div class="avatar" style="background: var(--system-gray); color: var(--text-muted);">A</div>
+                        <div>
+                            <div style="font-weight: 700; color: var(--text-dark);">Amit Iyer</div>
+                            <div class="subtitle" style="font-size: 0.8rem; margin-top: 2px;">Waiting for Labs</div>
+                        </div>
+                        <div class="hover-action" style="padding-right: 16px;"><button class="btn-pill-small">Process</button></div>
+                    </div>
+
+                    <div class="list-item patient-row" id="patient-rahul" data-type="future">
+                        <div class="avatar" style="background: var(--system-gray); color: var(--text-muted);">R</div>
+                        <div>
+                            <div style="font-weight: 700; color: var(--text-dark);">Rahul Sharma</div>
+                            <div class="subtitle" style="font-size: 0.8rem; margin-top: 2px;">Checkout & Follow-up</div>
+                        </div>
+                        <div class="hover-action" style="padding-right: 16px;"><button class="btn-pill-small">Process</button></div>
+                    </div>
+
+                </div>
+                
+                <div class="done-divider" id="done-divider"></div>
+                <div id="completed-departing-container"></div>
+            </div>
+        </div>
+
+        <div class="col-desk">
+            
+            <div id="panel-checkin">
+                <div class="column-header" style="border: none;"><span>Active Check-In</span></div>
+
+                <div class="card">
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div>
+                            <h1 class="title-massive">Poonam<br>Sharma</h1>
+                            <div class="subtitle" style="margin-top: 8px;">36 y/o • Female</div>
+                            
+                            <div class="tag-group">
+                                <span class="badge badge-info">Follow-up</span>
+                            </div>
+                        </div>
+                        <div class="avatar" style="background: var(--text-dark); color: white; font-size: 1.1rem; width: 48px; height: 48px; letter-spacing: 0.02em;">#81</div>
+                    </div>
+
+                    <div class="vitals-grid">
+                        <div class="vital-input-group">
+                            <span class="overline">HEART RATE</span>
+                            <label class="vital-well"><input type="text" class="vital-input" placeholder="--" maxlength="3" inputmode="numeric"><span class="vital-unit">bpm</span></label>
+                        </div>
+                        <div class="vital-input-group">
+                            <span class="overline">TEMP</span>
+                            <label class="vital-well"><input type="text" class="vital-input" id="input-temp" placeholder="--" maxlength="5" inputmode="decimal"><span class="vital-unit">°C</span></label>
+                        </div>
+                        <div class="vital-input-group">
+                            <span class="overline">BP</span>
+                            <label class="vital-well"><input type="text" class="vital-input" id="input-bp" placeholder="--/--" maxlength="7" inputmode="numeric"><span class="vital-unit">mmHg</span></label>
+                        </div>
+                        <div class="vital-input-group">
+                            <span class="overline">HEIGHT</span>
+                            <label class="vital-well"><input type="text" class="vital-input" placeholder="--" maxlength="3" inputmode="numeric"><span class="vital-unit">cm</span></label>
+                        </div>
+                        <div class="vital-input-group">
+                            <span class="overline">WEIGHT</span>
+                            <label class="vital-well"><input type="text" class="vital-input" placeholder="--" maxlength="5" inputmode="decimal"><span class="vital-unit">kg</span></label>
+                        </div>
+                    </div>
+
+                    <button class="btn-primary">Complete Check-in</button>
+
+                    <div class="action-links">
+                        <div class="link-subtle"><svg viewBox="0 0 24 24"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path></svg>Call</div>
+                        <div class="link-subtle"><svg viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>Message</div>
+                    </div>
+                </div>
+            </div>
+
+            <div id="panel-checkout" class="hidden" style="position: absolute; top: 0; left: 0; width: 100%;">
+                <div class="column-header" style="border: none;"><span>Post-Visit Checkout</span></div>
+                <div class="card" style="box-shadow: 0 16px 40px rgba(0, 122, 255, 0.08), 0 0 0 1px rgba(0, 122, 255, 0.1);">
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                        <div>
+                            <h1 class="title-massive" style="font-size: 2.8rem;" id="checkout-name">Patient Name</h1>
+                            <div class="subtitle" style="margin-top: 8px;" id="checkout-meta">Meta Info</div>
+                        </div>
+                        <div class="avatar" style="background: var(--text-dark); color: white; font-size: 1.1rem; width: 48px; height: 48px; letter-spacing: 0.02em;" id="checkout-token">#--</div>
+                    </div>
+
+                    <span class="section-label">Doctor's Orders</span>
+                    <div id="checkout-orders">
+                        </div>
+
+                    <span class="section-label">Financials</span>
+                    <div class="order-row" style="font-weight: 800;"><span>Total Due</span><span id="checkout-price">₹--</span></div>
+
+                    <button class="btn-primary" id="btn-final-checkout">Complete Checkout</button>
+                    <button class="btn-secondary" id="btn-requeue">
+                        <span style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10M23 14l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
+                            Re-Queue for Doctor
+                        </span>
+                    </button>
+                </div>
+            </div>
+
+        </div>
+
+        <div class="col-outbox">
+            <div class="column-header"><span>Clinic Flow</span></div>
+
+            <div class="handoff-card" id="handoff-card">
+                <span class="overline" style="color: var(--accent-blue);">
+                    <span class="pulse-dot"></span>
+                    Doctor is ready
+                </span>
+                <div id="handoff-patient-name" style="font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; margin-top: 6px; color: var(--text-dark);">Diya Singh</div>
+                <div class="subtitle" style="font-size: 0.9rem; margin-top: 2px;">Escort to Room 5</div>
+                
+                <div class="handoff-actions">
+                    <button class="btn-confirm">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+                        Confirm
+                    </button>
+                    <button class="btn-skip" id="btn-missing">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+                        Missing
+                    </button>
+                </div>
+            </div>
+
+            <div class="card-small">
+                <span class="overline">CURRENTLY SERVING</span>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 12px;">
+                    <div>
+                        <div style="font-size: 1.4rem; font-weight: 800; letter-spacing: -0.02em; color: var(--text-dark);">Amit Iyer</div>
+                        <div class="subtitle" style="font-size: 0.85rem;">Room 5</div>
+                    </div>
+                    <div style="font-size: 1.2rem; font-weight: 700; color: var(--accent-green);">14:22</div>
+                </div>
+            </div>
+
+            <div id="waiting-buffer-list" style="padding: 0 10px; margin-top: 10px;">
+                <span class="overline" style="margin-bottom: 16px;">Waiting Buffer</span>
+                
+                <div class="inert-patient-row">
+                    <div class="avatar" style="background: var(--text-dark); color: white;">N</div>
+                    <div>
+                        <div style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark);">Nisha Verma</div>
+                        <div class="subtitle" style="font-size: 0.75rem;">Token #84</div>
+                    </div>
+                </div>
+                
+                <div class="inert-patient-row">
+                    <div class="avatar" style="background: var(--system-gray); color: var(--text-muted);">A</div>
+                    <div>
+                        <div style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark);">Amit Singh</div>
+                        <div class="subtitle" style="font-size: 0.75rem;">Token #85</div>
+                    </div>
+                </div>
+
+                <div class="trigger-more" id="openQueueModal">
+                    + 14 more checked in
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <div class="modal-backdrop" id="queueModal">
+        <div class="modal-container" id="queueModalContent">
+            
+            <div class="modal-header">
+                <div>
+                    <h2 style="margin: 0; font-size: 1.2rem; font-weight: 800; color: var(--text-dark); letter-spacing: -0.01em;">Full Waiting Buffer</h2>
+                    <div class="subtitle" style="font-size: 0.85rem; margin-top: 4px;">16 patients ready for doctor</div>
+                </div>
+                <button class="btn-close" id="closeQueueModal">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+
+            <div class="modal-list">
+                <div class="modal-patient-row">
+                    <div class="patient-info-group">
+                        <div class="avatar" style="background: var(--text-dark); color: white;">N</div>
+                        <div>
+                            <div class="modal-patient-name" style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark);">Nisha Verma</div>
+                            <div class="subtitle modal-patient-token" style="font-size: 0.75rem;">Token #84</div>
+                        </div>
+                    </div>
+                    <button class="btn-override">Call Now</button>
+                </div>
+
+                <div class="modal-patient-row">
+                    <div class="patient-info-group">
+                        <div class="avatar" style="background: var(--system-gray); color: var(--text-muted);">A</div>
+                        <div>
+                            <div class="modal-patient-name" style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark);">Amit Singh</div>
+                            <div class="subtitle modal-patient-token" style="font-size: 0.75rem;">Token #85</div>
+                        </div>
+                    </div>
+                    <button class="btn-override">Call Now</button>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            
+            // --- 1. Smart Vitals Masking ---
+            const bpInput = document.getElementById('input-bp');
+            const tempInput = document.getElementById('input-temp');
+
+            if(bpInput) {
+                bpInput.addEventListener('input', (e) => {
+                    let val = e.target.value.replace(/\D/g, ''); 
+                    if (val.length > 3) val = val.substring(0, 3) + '/' + val.substring(3, 5);
+                    e.target.value = val;
+                });
+            }
+
+            if(tempInput) {
+                tempInput.addEventListener('input', (e) => {
+                    let val = e.target.value.replace(/[^\d]/g, ''); 
+                    if (val.length > 2) val = val.substring(0, 2) + '.' + val.substring(2, 3);
+                    e.target.value = val;
+                });
+            }
+            
+            document.querySelectorAll('.vital-input').forEach(input => {
+                if(input.id !== 'input-bp' && input.id !== 'input-temp'){
+                    input.addEventListener('input', function() {
+                         this.value = this.value.replace(/[^0-9.]/g, '');
+                    });
+                }
+            });
+
+            // --- 2. Modal Overlay Management ---
+            const modal = document.getElementById('queueModal');
+            const modalContent = document.getElementById('queueModalContent');
+            const btnOpen = document.getElementById('openQueueModal');
+            const btnClose = document.getElementById('closeQueueModal');
+
+            const openModal = () => modal.classList.add('active');
+            const closeModal = () => modal.classList.remove('active');
+
+            if(btnOpen) btnOpen.addEventListener('click', openModal);
+            if(btnClose) btnClose.addEventListener('click', closeModal);
+
+            modal.addEventListener('click', (e) => {
+                if (!modalContent.contains(e.target)) closeModal();
+            });
+
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape' && modal.classList.contains('active')) closeModal();
+            });
+
+            // --- Handoff Card & Queue Logic ---
+            const handoffCard = document.getElementById('handoff-card');
+            const handoffNameEl = document.getElementById('handoff-patient-name');
+            const bufferListEl = document.getElementById('waiting-buffer-list');
+            const inboxSearchBar = document.getElementById('inbox-search-bar'); 
+            const overrideBtns = document.querySelectorAll('.btn-override');
+
+            overrideBtns.forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    e.stopPropagation(); 
+                    
+                    const row = this.closest('.modal-patient-row');
+                    const newName = row.querySelector('.modal-patient-name').innerText;
+                    
+                    const currentName = handoffNameEl.innerText;
+                    const currentInitial = currentName.charAt(0);
+                    const currentToken = "Token #83"; 
+
+                    const newBufferRow = document.createElement('div');
+                    newBufferRow.className = 'inert-patient-row';
+                    newBufferRow.innerHTML = `
+                        <div class="avatar" style="background: var(--text-dark); color: white;">${currentInitial}</div>
+                        <div>
+                            <div style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark);">${currentName}</div>
+                            <div class="subtitle" style="font-size: 0.75rem;">${currentToken}</div>
+                        </div>
+                    `;
+
+                    const overline = bufferListEl.querySelector('.overline');
+                    if (overline) overline.insertAdjacentElement('afterend', newBufferRow);
+
+                    handoffNameEl.innerText = newName;
+                    row.remove();
+                    closeModal();
+                });
+            });
+
+            // --- Missing Workflow ---
+            const btnMissing = document.getElementById('btn-missing');
+
+            if (btnMissing && handoffCard && inboxSearchBar) {
+                btnMissing.addEventListener('click', function() {
+                    const patientName = handoffNameEl.innerText;
+                    const patientToken = "Token #83"; 
+                    const patientInitial = patientName.charAt(0);
+                    
+                    const demotedItem = document.createElement('div');
+                    demotedItem.className = 'list-item';
+                    demotedItem.style.backgroundColor = 'rgba(255, 159, 10, 0.08)'; 
+                    demotedItem.style.borderRadius = '16px';
+                    demotedItem.style.padding = '16px';
+                    demotedItem.style.marginBottom = '12px';
+                    demotedItem.style.borderBottom = 'none';
+                    demotedItem.style.opacity = '0';
+                    demotedItem.style.transform = 'translateX(20px)';
+                    demotedItem.style.transition = 'all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)';
+
+                    demotedItem.innerHTML = `
+                        <div class="time-block" style="color: var(--system-amber); font-weight: 800; font-size: 0.75rem;">MISSED</div>
+                        <div>
+                            <div style="font-weight: 700; color: var(--text-dark);">${patientName}</div>
+                            <div class="subtitle" style="font-size: 0.8rem; margin-top: 2px;">${patientToken}</div>
+                        </div>
+                        <div class="hover-action" style="background: transparent; padding-right: 16px; visibility: visible; opacity: 1;">
+                            <button class="btn-pill-small btn-requeue" style="color: var(--system-amber); border-color: rgba(255, 159, 10, 0.3);">Re-Queue</button>
+                        </div>
+                    `;
+
+                    handoffCard.style.transition = 'all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)';
+                    handoffCard.style.opacity = '0';
+                    handoffCard.style.transform = 'scale(0.95)';
+                    
+                    setTimeout(() => {
+                        handoffCard.style.display = 'none';
+                        inboxSearchBar.insertAdjacentElement('afterend', demotedItem);
+                        
+                        requestAnimationFrame(() => {
+                            demotedItem.style.opacity = '1';
+                            demotedItem.style.transform = 'translateX(0)';
+                        });
+
+                        const btnRequeue = demotedItem.querySelector('.btn-requeue');
+                        btnRequeue.addEventListener('click', function() {
+                            demotedItem.style.opacity = '0';
+                            demotedItem.style.transform = 'scale(0.95)';
+                            
+                            setTimeout(() => {
+                                demotedItem.remove(); 
+                                const newBufferRow = document.createElement('div');
+                                newBufferRow.className = 'inert-patient-row';
+                                newBufferRow.style.opacity = '0';
+                                newBufferRow.style.transform = 'translateY(-10px)';
+                                newBufferRow.style.transition = 'all 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)';
+                                
+                                newBufferRow.innerHTML = `
+                                    <div class="avatar" style="background: var(--text-dark); color: white;">${patientInitial}</div>
+                                    <div>
+                                        <div style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark);">${patientName}</div>
+                                        <div class="subtitle" style="font-size: 0.75rem;">${patientToken}</div>
+                                    </div>
+                                `;
+
+                                const overline = bufferListEl.querySelector('.overline');
+                                if (overline) overline.insertAdjacentElement('afterend', newBufferRow);
+
+                                requestAnimationFrame(() => {
+                                    newBufferRow.style.opacity = '1';
+                                    newBufferRow.style.transform = 'translateY(0)';
+                                });
+                            }, 250); 
+                        });
+                    }, 250); 
+                });
+            }
+
+            // --- 3. SEGMENTED CONTROL & CHECKOUT UI ---
+            const tabArriving = document.getElementById('tab-arriving');
+            const tabDeparting = document.getElementById('tab-departing');
+            const listArriving = document.getElementById('list-arriving');
+            const listDeparting = document.getElementById('list-departing');
+            
+            const panelCheckin = document.getElementById('panel-checkin');
+            const panelCheckout = document.getElementById('panel-checkout');
+            
+            const checkoutName = document.getElementById('checkout-name');
+            const checkoutMeta = document.getElementById('checkout-meta');
+            const checkoutToken = document.getElementById('checkout-token');
+            const checkoutOrders = document.getElementById('checkout-orders');
+            const checkoutPrice = document.getElementById('checkout-price');
+            const btnRequeue = document.getElementById('btn-requeue');
+            
+            let currentlySelectedRow = null;
+
+            // Tab Switching
+            tabDeparting.addEventListener('click', () => {
+                tabDeparting.classList.add('active'); tabArriving.classList.remove('active');
+                listArriving.classList.add('hidden'); listDeparting.classList.remove('hidden');
+            });
+
+            tabArriving.addEventListener('click', () => {
+                tabArriving.classList.add('active'); tabDeparting.classList.remove('active');
+                listDeparting.classList.add('hidden'); listArriving.classList.remove('hidden');
+                
+                // Return center panel to Check-in default
+                panelCheckout.classList.add('hidden');
+                panelCheckin.classList.remove('hidden');
+                
+                if(currentlySelectedRow && !currentlySelectedRow.classList.contains('completed')) {
+                    currentlySelectedRow.classList.remove('selected');
+                }
+                currentlySelectedRow = null;
+            });
+
+            // Select Patient for Checkout Logic
+            const patientRows = document.querySelectorAll('.patient-row');
+            
+            patientRows.forEach(row => {
+                row.addEventListener('click', function() {
+                    if(this.classList.contains('completed')) return;
+                    
+                    if(currentlySelectedRow) currentlySelectedRow.classList.remove('selected');
+                    currentlySelectedRow = this;
+                    this.classList.add('selected');
+
+                    const patientType = this.getAttribute('data-type');
+
+                    if (patientType === 'labs') {
+                        // AMIT
+                        checkoutName.innerText = "Amit Iyer";
+                        checkoutMeta.innerText = "42 y/o • Male • Finished in Room 5";
+                        checkoutToken.innerText = "#80";
+                        checkoutPrice.innerText = "₹800.00";
+                        checkoutOrders.innerHTML = `
+                            <div class="order-row"><span>Blood Test (CBC)</span><span class="badge-blue">Lab</span></div>
+                            <div class="order-row"><span>Paracetamol 500mg</span><span class="badge-blue" style="color: var(--text-muted); background: var(--system-gray);">Meds</span></div>
+                        `;
+                        btnRequeue.style.display = "flex";
+                        
+                    } else if (patientType === 'future') {
+                        // RAHUL
+                        checkoutName.innerText = "Rahul Sharma";
+                        checkoutMeta.innerText = "28 y/o • Male • Finished in Room 3";
+                        checkoutToken.innerText = "#92";
+                        checkoutPrice.innerText = "₹500.00";
+                        checkoutOrders.innerHTML = `
+                            <div class="order-row"><span>Return to Clinic: 2 Weeks</span><span class="badge-blue" style="color: var(--text-dark); background: #F4F3FC;">Follow-up</span></div>
+                            <div class="order-row"><span>Amoxicillin 250mg</span><span class="badge-blue" style="color: var(--text-muted); background: var(--system-gray);">Meds</span></div>
+                        `;
+                        btnRequeue.style.display = "none";
+                    }
+
+                    panelCheckin.classList.add('hidden');
+                    panelCheckout.classList.remove('hidden');
+                });
+            });
+
+            // ACTION: Re-Queue for Doctor
+            if(btnRequeue) {
+                btnRequeue.addEventListener('click', () => {
+                    if(!currentlySelectedRow) return;
+
+                    const newBufferRow = document.createElement('div');
+                    newBufferRow.className = 'inert-patient-row';
+                    newBufferRow.innerHTML = `
+                        <div class="avatar" style="background: var(--system-gray); color: var(--text-muted);">A</div>
+                        <div>
+                            <div style="font-size: 0.95rem; font-weight: 700; color: var(--text-dark); display: flex; align-items: center; gap: 8px;">
+                                Amit Iyer
+                                <span class="badge-blue" style="font-size: 0.6rem; padding: 2px 6px;">Lab Review</span>
+                            </div>
+                            <div class="subtitle" style="font-size: 0.75rem;">Token #80</div>
+                        </div>
+                    `;
+                    
+                    const overline = bufferListEl.querySelector('.overline');
+                    if(overline) overline.insertAdjacentElement('afterend', newBufferRow);
+
+                    // Remove from departing side
+                    currentlySelectedRow.remove();
+                    currentlySelectedRow = null;
+
+                    panelCheckout.classList.add('hidden');
+                    panelCheckin.classList.remove('hidden');
+                    tabArriving.click(); 
+                });
+            }
+
+            // ACTION: Final Checkout
+            const btnFinalCheckout = document.getElementById('btn-final-checkout');
+            const doneSection = document.getElementById('done-divider');
+            const completedContainer = document.getElementById('completed-departing-container');
+
+            if(btnFinalCheckout) {
+                btnFinalCheckout.addEventListener('click', () => {
+                    if(!currentlySelectedRow) return;
+
+                    currentlySelectedRow.classList.add('completed');
+                    currentlySelectedRow.classList.remove('selected');
+                    
+                    const hoverAction = currentlySelectedRow.querySelector('.hover-action');
+                    if(hoverAction) hoverAction.remove();
+
+                    // Change status text to DONE
+                    const timeBlock = currentlySelectedRow.querySelector('.time-block');
+                    if(timeBlock) {
+                        timeBlock.innerText = "DONE";
+                        timeBlock.style.color = "var(--text-muted)";
+                    }
+
+                    doneSection.classList.add('visible');
+                    completedContainer.appendChild(currentlySelectedRow);
+
+                    currentlySelectedRow = null;
+                    panelCheckout.classList.add('hidden');
+                    panelCheckin.classList.remove('hidden');
+                    tabArriving.click();
+                });
+            }
+
+        });
+    </script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-import { NowConsole } from "@/components/reception/now-console";
+import { ReceptionWorkspace } from "@/components/reception/reception-workspace";
 import { requireRole } from "@/lib/auth/guards";
 import { getSupabaseServiceRoleClient } from "@/lib/supabase/server";
 import type { Clinic, Doctor } from "@/lib/utils/types";
@@ -20,11 +20,9 @@ export default async function ReceptionPage() {
   ]);
 
   return (
-    <NowConsole
-      actorRole={user.role}
+    <ReceptionWorkspace
       clinic={(clinic as Clinic | null) ?? null}
       doctors={(doctors as Doctor[] | null) ?? []}
-      userLabel={user.email ?? user.firstName ?? user.role}
     />
   );
 }

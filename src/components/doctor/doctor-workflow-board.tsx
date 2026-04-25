@@ -1,11 +1,43 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 
-import { DoctorPulse, type PulseContext } from "@/components/doctor/doctor-pulse";
+import type { PulseContext } from "@/components/doctor/doctor-pulse";
 import { cn } from "@/lib/utils/cn";
 import type { Doctor, TokenStatus } from "@/lib/utils/types";
+
+const DoctorPulse = dynamic(
+  () => import("@/components/doctor/doctor-pulse").then((module) => module.DoctorPulse),
+  { ssr: false, loading: () => null }
+);
+
+type PulseBoundaryProps = {
+  children: React.ReactNode;
+};
+
+type PulseBoundaryState = {
+  hasError: boolean;
+};
+
+class PulseBoundary extends React.Component<PulseBoundaryProps, PulseBoundaryState> {
+  state: PulseBoundaryState = {
+    hasError: false
+  };
+
+  static getDerivedStateFromError(): PulseBoundaryState {
+    return { hasError: true };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return null;
+    }
+
+    return this.props.children;
+  }
+}
 
 type QueueItem = {
   id: string;
@@ -359,6 +391,7 @@ export function DoctorWorkflowBoard({
               else void pauseQueue();
             }}
             className="group flex items-center space-x-3 rounded-full border border-white/80 bg-white/70 px-8 py-3 shadow-sm backdrop-blur-[30px] transition-all active:scale-95 disabled:opacity-60"
+            type="button"
           >
             <span
               className={cn(
@@ -421,6 +454,7 @@ export function DoctorWorkflowBoard({
                     void runQueueAction("start_consultation", nextWaiting.id);
                   }}
                   className={primaryActionClass}
+                  type="button"
                 >
                   Call Patient
                 </button>
@@ -511,6 +545,7 @@ export function DoctorWorkflowBoard({
                         void runQueueAction("mark_consultation_done", currentServing.id);
                       }}
                       className="flex-1 rounded-[32px] bg-slate-900 py-8 text-sm font-bold uppercase tracking-widest text-white shadow-2xl transition-all hover:bg-black active:scale-[0.985] disabled:opacity-60"
+                      type="button"
                     >
                       Complete Consultation
                     </button>
@@ -521,6 +556,7 @@ export function DoctorWorkflowBoard({
                         void runQueueAction("hold_slot", currentServing.id);
                       }}
                       className="rounded-[30px] border border-slate-200 bg-white px-14 py-6 text-[11px] font-bold uppercase tracking-[0.2em] text-slate-900 transition-all hover:bg-slate-50 active:scale-[0.98] disabled:opacity-60"
+                      type="button"
                     >
                       Hold
                     </button>
@@ -564,6 +600,7 @@ export function DoctorWorkflowBoard({
                 <button
                   onClick={() => void refreshQueue()}
                   className={primaryActionClass}
+                  type="button"
                 >
                   Refresh Queue
                 </button>
@@ -580,7 +617,9 @@ export function DoctorWorkflowBoard({
         </span>
       </div>
 
-      <DoctorPulse context={pulseContext} />
+      <PulseBoundary>
+        <DoctorPulse context={pulseContext} />
+      </PulseBoundary>
     </div>
   );
 }
