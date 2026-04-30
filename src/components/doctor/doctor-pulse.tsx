@@ -721,7 +721,7 @@ function PulseOverlay({
         <div
           className={cn(
             "pointer-events-auto w-full max-w-[680px] transition-all",
-            "duration-[320ms] ease-[cubic-bezier(0.33,1,0.68,1)]",
+            "duration-300 ease-out",
             open
               ? "translate-y-0 scale-100 opacity-100"
               : "translate-y-3 scale-[0.975] opacity-0"

@@ -1,715 +1,544 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { Clinic, Doctor } from "@/lib/utils/types";
 
-import { ContextArea } from "./workspace/context-area";
-import { FocusArea } from "./workspace/focus-area";
+import { ClinicFlow } from "./workspace/clinic-flow";
+import { CommandPalette } from "./workspace/command-palette";
 import { GlobalNav } from "./workspace/global-nav";
+import { Inbox } from "./workspace/inbox";
 import styles from "./workspace/reception-workspace.module.css";
+import { highestWeightSignal, signalsFor, type ClosedTokenRef } from "./workspace/signals";
+import { SimulatorFab } from "./workspace/simulator-fab";
+import { TheDesk } from "./workspace/the-desk";
+import { UndoToast } from "./workspace/undo-toast";
+import { useWorkspaceState } from "./workspace/use-workspace-state";
 import type {
   DoctorOption,
-  PatientVitals,
-  ReadyPatient,
-  ReceptionPatient,
-  ServingPatient,
+  Patient,
+  RequeueReason,
   VitalsField
 } from "./workspace/types";
 
-const DEFAULT_VITALS: PatientVitals = {
-  heartRate: "",
-  temperature: "",
-  bloodPressure: "",
-  height: "",
-  weight: ""
-};
-
-function createEmptyVitals(): PatientVitals {
-  return { ...DEFAULT_VITALS };
-}
-
-function clampNumber(value: number, min: number, max: number) {
-  return Math.min(Math.max(value, min), max);
-}
-
-function sanitizeVitalInput(field: VitalsField, value: string) {
-  if (field === "bloodPressure") {
-    const cleaned = value.replace(/[^\d/]/g, "");
-    const [rawSystolic = "", rawDiastolic = "", ...rest] = cleaned.split("/");
-    const systolic = rawSystolic.slice(0, 3);
-    const diastolic = rawDiastolic.slice(0, 3);
-
-    if (cleaned.includes("/") || rest.length > 0) {
-      return `${systolic}/${diastolic}`;
-    }
-
-    return systolic;
-  }
-
-  if (field === "temperature" || field === "weight") {
-    const cleaned = value.replace(/[^\d.]/g, "");
-    const [whole = "", fractional = ""] = cleaned.split(".");
-    const limitedWhole = whole.slice(0, field === "temperature" ? 2 : 3);
-    const limitedFractional = fractional.slice(0, 1);
-    return limitedFractional.length > 0 ? `${limitedWhole}.${limitedFractional}` : limitedWhole;
-  }
-
-  return value.replace(/\D/g, "").slice(0, 3);
-}
-
-function formatVitalOnBlur(field: VitalsField, value: string) {
-  if (!value.trim()) {
-    return "";
-  }
-
-  if (field === "heartRate") {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isNaN(parsed) ? "" : String(clampNumber(parsed, 30, 220));
-  }
-
-  if (field === "temperature") {
-    const parsed = Number.parseFloat(value);
-    return Number.isNaN(parsed) ? "" : clampNumber(parsed, 34, 43).toFixed(1);
-  }
-
-  if (field === "height") {
-    const parsed = Number.parseInt(value, 10);
-    return Number.isNaN(parsed) ? "" : String(clampNumber(parsed, 50, 250));
-  }
-
-  if (field === "weight") {
-    const parsed = Number.parseFloat(value);
-    return Number.isNaN(parsed) ? "" : clampNumber(parsed, 2, 300).toFixed(parsed % 1 === 0 ? 0 : 1);
-  }
-
-  const [systolicValue, diastolicValue] = value.split("/");
-  const systolic = Number.parseInt(systolicValue ?? "", 10);
-  const diastolic = Number.parseInt(diastolicValue ?? "", 10);
-
-  if (Number.isNaN(systolic) || Number.isNaN(diastolic)) {
-    return "";
-  }
-
-  const nextSystolic = clampNumber(systolic, 70, 240);
-  const nextDiastolic = clampNumber(diastolic, 40, 140);
-  return `${nextSystolic}/${nextDiastolic}`;
-}
-
-type PatientSeed = Pick<
-  ReceptionPatient,
-  | "firstName"
-  | "lastName"
-  | "age"
-  | "gender"
-  | "visitType"
-  | "note"
->;
-
-type DoctorWorkspaceState = {
-  activeByDoctor: Record<string, ReceptionPatient>;
-  upcoming: ReceptionPatient[];
-  readyByDoctor: Record<string, ReadyPatient[]>;
-  currentlyServingByDoctor: Record<string, ServingPatient>;
-  vitalsByPatient: Record<string, PatientVitals>;
-};
-
-
-const ACTIVE_PATIENT_SEEDS: PatientSeed[] = [
-  {
-    firstName: "Poonam",
-    lastName: "Sharma",
-    age: 36,
-    gender: "Female",
-    visitType: "Follow-up",
-    note: "Vitals pending"
-  },
-  {
-    firstName: "Vikram",
-    lastName: "Sethi",
-    age: 44,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "BP recheck"
-  },
-  {
-    firstName: "Leena",
-    lastName: "Thomas",
-    age: 29,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "Registration complete"
-  },
-  {
-    firstName: "Yusuf",
-    lastName: "Mirza",
-    age: 51,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Cardiac review"
-  },
-  {
-    firstName: "Kavya",
-    lastName: "Nair",
-    age: 32,
-    gender: "Female",
-    visitType: "Follow-up",
-    note: "Lab report upload"
-  }
-];
-
-const DUMMY_UPCOMING_PATIENT_SEED: PatientSeed[] = [
-  {
-    firstName: "Aravind",
-    lastName: "Swamy",
-    age: 42,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Token called"
-  },
-  {
-    firstName: "Maya",
-    lastName: "Patel",
-    age: 29,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "First consultation"
-  },
-  {
-    firstName: "Nikhil",
-    lastName: "Verma",
-    age: 33,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Vitals pending"
-  },
-  {
-    firstName: "Ishita",
-    lastName: "Rao",
-    age: 25,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "Walk-in"
-  },
-  {
-    firstName: "Raghav",
-    lastName: "Menon",
-    age: 47,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Vitals captured"
-  },
-  {
-    firstName: "Ananya",
-    lastName: "Gupta",
-    age: 31,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "Consult pending"
-  },
-  {
-    firstName: "Harish",
-    lastName: "Kulkarni",
-    age: 55,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Needs BP check"
-  },
-  {
-    firstName: "Pallavi",
-    lastName: "Nair",
-    age: 38,
-    gender: "Female",
-    visitType: "Follow-up",
-    note: "Lab report review"
-  },
-  {
-    firstName: "Adeel",
-    lastName: "Khan",
-    age: 27,
-    gender: "Male",
-    visitType: "New Visit",
-    note: "Vitals pending"
-  },
-  {
-    firstName: "Sneha",
-    lastName: "Bose",
-    age: 34,
-    gender: "Female",
-    visitType: "Follow-up",
-    note: "Follow-up consult"
-  },
-  {
-    firstName: "Kiran",
-    lastName: "Desai",
-    age: 44,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Cardiac history"
-  },
-  {
-    firstName: "Meera",
-    lastName: "Iyer",
-    age: 30,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "First-time visit"
-  },
-  {
-    firstName: "Dev",
-    lastName: "Chopra",
-    age: 40,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Vitals complete"
-  },
-  {
-    firstName: "Lavanya",
-    lastName: "Reddy",
-    age: 36,
-    gender: "Female",
-    visitType: "Follow-up",
-    note: "Escalated in queue"
-  },
-  {
-    firstName: "Sanjay",
-    lastName: "Pillai",
-    age: 52,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Review medicines"
-  },
-  {
-    firstName: "Ritu",
-    lastName: "Agarwal",
-    age: 41,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "Walk-in"
-  },
-  {
-    firstName: "Yash",
-    lastName: "Shah",
-    age: 28,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Vitals captured"
-  },
-  {
-    firstName: "Priya",
-    lastName: "Malhotra",
-    age: 32,
-    gender: "Female",
-    visitType: "Follow-up",
-    note: "Pending consultation"
-  },
-  {
-    firstName: "Neeraj",
-    lastName: "Joshi",
-    age: 49,
-    gender: "Male",
-    visitType: "Follow-up",
-    note: "Doctor requested early"
-  },
-  {
-    firstName: "Farah",
-    lastName: "Ali",
-    age: 35,
-    gender: "Female",
-    visitType: "New Visit",
-    note: "New registration"
-  }
-];
-
-const READY_PATIENT_SEEDS = [
-  { name: "Diya Singh", statusLabel: "Vitals Captured" },
-  { name: "Kabir Nair", statusLabel: "Waiting at room" },
-  { name: "Sara Khan", statusLabel: "Vitals Captured" },
-  { name: "Rohan Paul", statusLabel: "Token announced" },
-  { name: "Nisha Verma", statusLabel: "Waiting at room" },
-  { name: "Imran Ali", statusLabel: "Vitals Captured" },
-  { name: "Tara Bose", statusLabel: "Doctor notified" },
-  { name: "Manav Rao", statusLabel: "Waiting at room" }
-] as const;
-
-const CURRENTLY_SERVING_SEEDS = [
-  { name: "Amit Iyer", clockLabel: "14:22" },
-  { name: "Naina Shah", clockLabel: "14:18" },
-  { name: "Vikas Mehra", clockLabel: "14:11" },
-  { name: "Ritu Das", clockLabel: "14:05" },
-  { name: "Arjun Pillai", clockLabel: "13:59" }
-] as const;
-
-function formatTimelineSlot(index: number) {
-  const startMinutes = 12 * 60 + 25;
-  const slotMinutes = startMinutes + index * 8;
-  const hours = Math.floor(slotMinutes / 60)
-    .toString()
-    .padStart(2, "0");
-  const minutes = (slotMinutes % 60).toString().padStart(2, "0");
-  return `${hours}:${minutes}`;
-}
-
-function formatClock(date: Date) {
-  return new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false }).format(
-    date
-  );
-}
-
-function buildDoctorLine(doctor: DoctorOption) {
-  return `${doctor.name}${doctor.room ? ` • ${doctor.room}` : ""}`;
-}
-
-function deriveInitial(label: string) {
-  return label.trim()[0]?.toUpperCase() ?? "P";
-}
-
-
 function buildDoctorOptions(doctors: Doctor[]): DoctorOption[] {
-  if (!doctors.length) {
-    return [{ id: "fallback", name: "Dr. Ravi Kumar", room: "Room 5" }];
-  }
+  if (!doctors.length) return [];
   const seen = new Set<string>();
   const unique: DoctorOption[] = [];
   for (const doctor of doctors) {
     const key = doctor.name.trim().toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    unique.push({ id: doctor.id, name: doctor.name, room: doctor.room });
+    unique.push({
+      id: doctor.id,
+      name: doctor.name,
+      room: doctor.room ?? null,
+      specialty: doctor.specialty ?? null,
+      status: doctor.status,
+      avgConsultMinutes: doctor.avg_consult_minutes,
+      breakReturnTime: doctor.break_return_time
+    });
   }
   return unique;
 }
 
-function buildInitialPatients(doctorOptions: DoctorOption[]): DoctorWorkspaceState {
-  const activeByDoctor: Record<string, ReceptionPatient> = {};
-  const readyByDoctor: Record<string, ReadyPatient[]> = {};
-  const currentlyServingByDoctor: Record<string, ServingPatient> = {};
-  const vitalsByPatient: Record<string, PatientVitals> = {};
-  let nextTokenNumber = 81;
-
-  doctorOptions.forEach((doctor, index) => {
-    const activeSeed = ACTIVE_PATIENT_SEEDS[index % ACTIVE_PATIENT_SEEDS.length];
-    const activePatient: ReceptionPatient = {
-      id: `active-${doctor.id}`,
-      doctorId: doctor.id,
-      tokenNumber: nextTokenNumber,
-      initials: deriveInitial(activeSeed.firstName),
-      timelineTime: formatTimelineSlot(index),
-      ...activeSeed
-    };
-
-    activeByDoctor[doctor.id] = activePatient;
-    vitalsByPatient[activePatient.id] = createEmptyVitals();
-
-    const readySeedOffset = (index * 2) % READY_PATIENT_SEEDS.length;
-    readyByDoctor[doctor.id] = [0, 1].map((readyIndex) => {
-      const readySeed = READY_PATIENT_SEEDS[(readySeedOffset + readyIndex) % READY_PATIENT_SEEDS.length];
-      return {
-        id: `${doctor.id}-ready-${readyIndex + 1}`,
-        name: readySeed.name,
-        initials: deriveInitial(readySeed.name),
-        statusLabel: readySeed.statusLabel
-      };
-    });
-
-    const servingSeed = CURRENTLY_SERVING_SEEDS[index % CURRENTLY_SERVING_SEEDS.length];
-    currentlyServingByDoctor[doctor.id] = {
-      id: `serving-${doctor.id}`,
-      name: servingSeed.name,
-      doctorLine: buildDoctorLine(doctor),
-      clockLabel: servingSeed.clockLabel
-    };
-
-    nextTokenNumber += 1;
-  });
-
-  const upcoming: ReceptionPatient[] = DUMMY_UPCOMING_PATIENT_SEED.map((seed, index) => {
-    const doctor = doctorOptions[index % doctorOptions.length];
-    const tokenNumber = nextTokenNumber + index;
-    return {
-      id: `patient-${tokenNumber}`,
-      doctorId: doctor.id,
-      tokenNumber,
-      initials: deriveInitial(seed.firstName),
-      timelineTime: formatTimelineSlot(index),
-      ...seed
-    };
-  });
-
-  return { activeByDoctor, upcoming, readyByDoctor, currentlyServingByDoctor, vitalsByPatient };
+function outcomeLabelFor(patient: Patient) {
+  if (patient.noteOverride) return patient.noteOverride;
+  switch (patient.outcome) {
+    case "prescription_shared":
+      return "Prescription shared";
+    case "external_lab_referral":
+      return "External lab referral";
+    case "return_with_reports":
+      return "Lab report review";
+    case "doctor_recall":
+      return "Doctor review";
+    case "follow_up_later":
+      return "Follow-up reminder sent";
+    case "payment_due":
+      return "Payment due";
+    case "closed_no_action":
+      return "No front-desk action";
+    default:
+      return null;
+  }
 }
 
-export function ReceptionWorkspace({ clinic, doctors }: { clinic: Clinic | null; doctors: Doctor[] }) {
+export function ReceptionWorkspace({
+  clinic,
+  doctors
+}: {
+  clinic: Clinic | null;
+  doctors: Doctor[];
+}) {
   const doctorOptions = useMemo(() => buildDoctorOptions(doctors), [doctors]);
-  const initialWorkspace = useMemo(() => buildInitialPatients(doctorOptions), [doctorOptions]);
+  const workspace = useWorkspaceState(doctorOptions);
 
-  const [isQueuePaused, setIsQueuePaused] = useState(false);
-  const [searchValue, setSearchValue] = useState("");
-  const [doctorIndex, setDoctorIndex] = useState(0);
-  const [activePatientsByDoctor, setActivePatientsByDoctor] = useState<Record<string, ReceptionPatient>>(
-    initialWorkspace.activeByDoctor
-  );
-  const [upcomingPatients, setUpcomingPatients] = useState<ReceptionPatient[]>(initialWorkspace.upcoming);
-  const [readyQueuesByDoctor, setReadyQueuesByDoctor] = useState<Record<string, ReadyPatient[]>>(
-    initialWorkspace.readyByDoctor
-  );
-  const [vitalsByPatient, setVitalsByPatient] = useState<Record<string, PatientVitals>>(
-    initialWorkspace.vitalsByPatient
-  );
-  const [currentlyServingByDoctor, setCurrentlyServingByDoctor] = useState<Record<string, ServingPatient>>(
-    initialWorkspace.currentlyServingByDoctor
-  );
-  const [isTransferRunning, setIsTransferRunning] = useState(false);
-  const [swappingPatientId, setSwappingPatientId] = useState<string | null>(null);
+  const {
+    state,
+    dispatch,
+    selectedDoctor,
+    arriving,
+    closedToday,
+    flowForSelected,
+    focusedPatient,
+    undo,
+    queueUndo,
+    clearUndo
+  } = workspace;
 
-  const selectedDoctor = doctorOptions[doctorIndex] ?? doctorOptions[0];
-  const activePatient = activePatientsByDoctor[selectedDoctor.id] ?? initialWorkspace.activeByDoctor[selectedDoctor.id];
-  const readyQueue = readyQueuesByDoctor[selectedDoctor.id] ?? [];
-  const currentlyServing =
-    currentlyServingByDoctor[selectedDoctor.id] ?? initialWorkspace.currentlyServingByDoctor[selectedDoctor.id];
-  const vitals = vitalsByPatient[activePatient.id] ?? createEmptyVitals();
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
-  const doctorLine = useMemo(
-    () => buildDoctorLine(selectedDoctor),
-    [selectedDoctor]
-  );
+  const doctorNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const doctor of state.doctors) map.set(doctor.id, doctor.name);
+    return map;
+  }, [state.doctors]);
 
-  const focusIdentityRef = useRef<HTMLDivElement | null>(null);
-  const releaseTimerRef = useRef<number | null>(null);
-
-  useEffect(
-    () => () => {
-      if (releaseTimerRef.current) {
-        window.clearTimeout(releaseTimerRef.current);
-      }
-    },
-    []
-  );
-
-  const doctorUpcoming = useMemo(
-    () => upcomingPatients.filter((patient) => patient.doctorId === selectedDoctor.id),
-    [upcomingPatients, selectedDoctor.id]
-  );
-
-  const filteredUpcoming = useMemo(() => {
-    const normalizedQuery = searchValue.trim().toLowerCase();
-    if (!normalizedQuery) {
-      return doctorUpcoming;
-    }
-    return doctorUpcoming.filter((patient) => {
-      const fullName = `${patient.firstName} ${patient.lastName}`.toLowerCase();
-      return (
-        fullName.includes(normalizedQuery) ||
-        String(patient.tokenNumber).includes(normalizedQuery)
-      );
-    });
-  }, [doctorUpcoming, searchValue]);
-
-  const visibleUpcoming = useMemo(() => filteredUpcoming.slice(0, 2), [filteredUpcoming]);
-
-  const hasCapturedVitals = useMemo(
-    () => Object.values(vitals).some((value) => value.trim().length > 0),
-    [vitals]
-  );
-
-
-  const promoteToFocus = useCallback(
-    (patientId: string) => {
-      if (isTransferRunning) {
-        return;
-      }
-
-      const incomingPatient = upcomingPatients.find((patient) => patient.id === patientId);
-      if (!incomingPatient || incomingPatient.id === activePatient.id) {
-        return;
-      }
-
-      const priorActive = activePatient;
-      const returningPrior: ReceptionPatient = {
-        ...priorActive,
-        note: hasCapturedVitals ? "Partial vitals saved" : priorActive.note
-      };
-
-      setIsTransferRunning(true);
-      setSwappingPatientId(patientId);
-      setActivePatientsByDoctor((previous) => ({
-        ...previous,
-        [selectedDoctor.id]: incomingPatient
-      }));
-      setVitalsByPatient((previous) => ({
-        ...previous,
-        [priorActive.id]: previous[priorActive.id] ?? vitals,
-        [incomingPatient.id]: previous[incomingPatient.id] ?? createEmptyVitals()
-      }));
-      setUpcomingPatients((previous) => {
-        const withoutIncoming = previous.filter((patient) => patient.id !== patientId);
-        const merged = [returningPrior, ...withoutIncoming];
-        return merged.sort((a, b) => a.tokenNumber - b.tokenNumber);
+  const closedRefsByPatientProfileId = useMemo(() => {
+    const map = new Map<string, ClosedTokenRef[]>();
+    for (const patient of closedToday) {
+      if (!patient.patientProfileId || !patient.closedAt) continue;
+      const refs = map.get(patient.patientProfileId) ?? [];
+      refs.push({
+        tokenId: patient.id,
+        patientProfileId: patient.patientProfileId,
+        closedAt: patient.closedAt,
+        outcome: patient.outcome,
+        outcomeLabel: outcomeLabelFor(patient),
+        doctorName: doctorNameById.get(patient.doctorId) ?? "Doctor"
       });
+      map.set(patient.patientProfileId, refs);
+    }
+    return map;
+  }, [closedToday, doctorNameById]);
 
-      if (releaseTimerRef.current) {
-        window.clearTimeout(releaseTimerRef.current);
-      }
-      releaseTimerRef.current = window.setTimeout(() => {
-        setIsTransferRunning(false);
-        setSwappingPatientId(null);
-      }, 260);
-    },
-    [activePatient, hasCapturedVitals, isTransferRunning, selectedDoctor.id, upcomingPatients, vitals]
+  const getSignalsForPatient = useCallback(
+    (patient: Patient) =>
+      signalsFor({
+        patient,
+        clinic: state.capabilities,
+        signalPolicy: state.capabilities.signalPolicy,
+        sameDayClosedTokensForPatient:
+          closedRefsByPatientProfileId.get(patient.patientProfileId) ?? [],
+        now: state.now
+      }),
+    [closedRefsByPatientProfileId, state.capabilities, state.now]
   );
 
-  const finalizeCheckIn = useCallback(() => {
-    const activeName = `${activePatient.firstName} ${activePatient.lastName}`;
-    const nextDoctorPatient = doctorUpcoming[0];
+  const focusedSignals = useMemo(
+    () => (focusedPatient ? getSignalsForPatient(focusedPatient) : []),
+    [focusedPatient, getSignalsForPatient]
+  );
 
-    setReadyQueuesByDoctor((previous) => ({
-      ...previous,
-      [selectedDoctor.id]: [
-        {
-          id: `${activePatient.id}-ready-${Date.now()}`,
-          name: activeName,
-          initials: activePatient.initials,
-          statusLabel: "Vitals Captured"
-        },
-        ...(previous[selectedDoctor.id] ?? [])
-      ]
-    }));
-    if (nextDoctorPatient) {
-      setActivePatientsByDoctor((previous) => ({
-        ...previous,
-        [selectedDoctor.id]: nextDoctorPatient
-      }));
-      setUpcomingPatients((previous) => previous.filter((patient) => patient.id !== nextDoctorPatient.id));
-    }
-    setVitalsByPatient((previous) => ({
-      ...previous,
-      [activePatient.id]: createEmptyVitals(),
-      ...(nextDoctorPatient
-        ? {
-            [nextDoctorPatient.id]: previous[nextDoctorPatient.id] ?? createEmptyVitals()
-          }
-        : {})
-    }));
-  }, [
-    activePatient.firstName,
-    activePatient.id,
-    activePatient.initials,
-    activePatient.lastName,
-    doctorUpcoming,
-    selectedDoctor.id
-  ]);
+  // ---------- Cmd+K shortcut + accelerator keys ----------
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isInsideEditable =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.getAttribute("contenteditable") === "true");
 
-  const handleCompleteCheckIn = useCallback(() => {
-    finalizeCheckIn();
-  }, [finalizeCheckIn]);
-
-  const handleCallPatient = useCallback(() => {
-    setCurrentlyServingByDoctor((previous) => ({
-      ...previous,
-      [selectedDoctor.id]: {
-        id: activePatient.id,
-        name: `${activePatient.firstName} ${activePatient.lastName}`,
-        doctorLine,
-        clockLabel: formatClock(new Date())
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
       }
-    }));
-  }, [activePatient.firstName, activePatient.id, activePatient.lastName, doctorLine, selectedDoctor.id]);
-
-  const handleTextPatient = useCallback(() => {
-    setReadyQueuesByDoctor((previous) => {
-      const queue = previous[selectedDoctor.id] ?? [];
-      if (!queue.length) {
-        return previous;
-      }
-      const [head, ...tail] = queue;
-      return {
-        ...previous,
-        [selectedDoctor.id]: [{ ...head, statusLabel: "Message sent" }, ...tail]
-      };
-    });
-  }, [selectedDoctor.id]);
-
-  const handleCallNext = useCallback(() => {
-    const nextPatient = filteredUpcoming[0];
-    if (!nextPatient) {
-      return;
-    }
-    promoteToFocus(nextPatient.id);
-  }, [filteredUpcoming, promoteToFocus]);
-
-  const handleVitalChange = useCallback((field: VitalsField, value: string) => {
-    const sanitizedValue = sanitizeVitalInput(field, value);
-
-    setVitalsByPatient((previous) => ({
-      ...previous,
-      [activePatient.id]: {
-        ...(previous[activePatient.id] ?? createEmptyVitals()),
-        [field]: sanitizedValue
-      }
-    }));
-  }, [activePatient.id]);
-
-  const handleVitalBlur = useCallback((field: VitalsField) => {
-    setVitalsByPatient((previous) => {
-      const currentVitals = previous[activePatient.id] ?? createEmptyVitals();
-      const formattedValue = formatVitalOnBlur(field, currentVitals[field]);
-
-      if (formattedValue === currentVitals[field]) {
-        return previous;
-      }
-
-      return {
-        ...previous,
-        [activePatient.id]: {
-          ...currentVitals,
-          [field]: formattedValue
+      if (event.key === "Escape") {
+        if (paletteOpen) {
+          setPaletteOpen(false);
+        } else if (state.desk.patientId && !isInsideEditable) {
+          dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
         }
-      };
-    });
-  }, [activePatient.id]);
+        return;
+      }
+      if (!isInsideEditable && (event.metaKey || event.ctrlKey)) {
+        if (event.key === "1") {
+          event.preventDefault();
+          setPaletteOpen(false);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dispatch, paletteOpen, state.desk.patientId]);
+
+  // ---------- handlers ----------
+
+  const handleDeskBind = useCallback(
+    (patient: Patient, mode: "vitals" | "checkout") => {
+      dispatch({ type: "bind_desk", patientId: patient.id, mode });
+      // If the patient belongs to a different doctor, sync the Flow column.
+      if (patient.doctorId !== state.selectedDoctorId) {
+        dispatch({ type: "select_doctor", doctorId: patient.doctorId });
+      }
+    },
+    [dispatch, state.selectedDoctorId]
+  );
+
+  const handlePickArriving = useCallback(
+    (patient: Patient) => handleDeskBind(patient, "vitals"),
+    [handleDeskBind]
+  );
+
+  const handleVitalChange = useCallback(
+    (field: VitalsField, value: string) => {
+      if (!focusedPatient) return;
+      dispatch({ type: "set_vital", patientId: focusedPatient.id, field, value });
+    },
+    [dispatch, focusedPatient]
+  );
+
+  const handleVitalBlur = useCallback(
+    (field: VitalsField) => {
+      if (!focusedPatient) return;
+      dispatch({ type: "format_vital", patientId: focusedPatient.id, field });
+    },
+    [dispatch, focusedPatient]
+  );
+
+  const handleCompleteCheckIn = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "complete_checkin", patientId: patient.id });
+      // Auto-bind to the next arriving patient (if any) for that doctor — keeps flow tight.
+      const nextArriving = arriving.find(
+        (p) => p.id !== patient.id && p.doctorId === patient.doctorId
+      );
+      if (nextArriving) {
+        dispatch({ type: "bind_desk", patientId: nextArriving.id, mode: "vitals" });
+      } else {
+        dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+      }
+    },
+    [arriving, dispatch]
+  );
+
+  const handleVitalsRequiredAttempt = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "mark_vitals_required_attempt", patientId: patient.id });
+    },
+    [dispatch]
+  );
+
+  const handleCompleteCheckout = useCallback(
+    (patient: Patient) => {
+      const snapshot: Patient = { ...patient };
+      dispatch({ type: "complete_checkout", patientId: patient.id });
+      // queue undo
+      queueUndo({
+        id: `undo-checkout-${patient.id}-${Date.now()}`,
+        label: `Closed visit · ${patient.firstName} ${patient.lastName}`,
+        expiresAt: Date.now() + 5000,
+        revert: () => {
+          dispatch({
+            type: "transition",
+            patientId: snapshot.id,
+            to: snapshot.lifecycle,
+            reason: "Undo close"
+          });
+        }
+      });
+      dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+    },
+    [dispatch, queueUndo]
+  );
+
+  // Receptionist clicks a waiting row → Desk previews that patient.
+  // The queue is not mutated until the receptionist explicitly presses
+  // "Start calling" on the center card.
+  const handlePickForHandoff = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "bind_desk", patientId: patient.id, mode: "handoff" });
+      if (patient.doctorId !== state.selectedDoctorId) {
+        dispatch({ type: "select_doctor", doctorId: patient.doctorId });
+      }
+    },
+    [dispatch, state.selectedDoctorId]
+  );
+
+  // Explicit call start from the center card.
+  const handleInitiateHandoff = useCallback(
+    (patient: Patient) => {
+      dispatch({
+        type: "doctor_signal_ready",
+        doctorId: patient.doctorId,
+        patientId: patient.id
+      });
+    },
+    [dispatch]
+  );
+
+  // "Patient in room" — confirm escort completed. Auto-advance Desk to the
+  // next arriving patient for vitals capture, or go idle.
+  const handleConfirmHandoff = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "confirm_handoff", patientId: patient.id });
+      const nextArriving = arriving.find((p) => p.doctorId === patient.doctorId);
+      if (nextArriving) {
+        dispatch({ type: "bind_desk", patientId: nextArriving.id, mode: "vitals" });
+      } else {
+        dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+      }
+    },
+    [arriving, dispatch]
+  );
+
+  // "No response" — flag the patient missed and preview the next waiting
+  // patient. It does not auto-start another call.
+  const handleMarkMissing = useCallback(
+    (patient: Patient) => {
+      const snapshot: Patient = { ...patient };
+      dispatch({ type: "mark_missing", patientId: patient.id });
+      queueUndo({
+        id: `undo-missing-${patient.id}-${Date.now()}`,
+        label: `Marked ${patient.firstName} missing`,
+        expiresAt: Date.now() + 5000,
+        revert: () => {
+          dispatch({
+            type: "transition",
+            patientId: snapshot.id,
+            to: snapshot.lifecycle,
+            missCountDelta: -1,
+            reason: "Undo missing"
+          });
+        }
+      });
+      // Auto-advance: pick the next non-missed patient in the same doctor's
+      // lobby. Skip the patient we just missed (they're now demoted).
+      const nextInLobby = flowForSelected.buffer.find(
+        (p) =>
+          p.id !== patient.id &&
+          (p.lifecycle === "buffer_normal" ||
+            p.lifecycle === "buffer_lab_review" ||
+            p.lifecycle === "buffer_doctor_recall")
+      );
+      if (nextInLobby) {
+        dispatch({ type: "bind_desk", patientId: nextInLobby.id, mode: "handoff" });
+      } else {
+        dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+      }
+    },
+    [dispatch, flowForSelected.buffer, queueUndo]
+  );
+
+  const handleCloseNoShow = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "close_no_show", patientId: patient.id });
+      dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+    },
+    [dispatch]
+  );
+
+  const handleSimulateDoctorReady = useCallback(
+    (patient: Patient) => {
+      dispatch({
+        type: "doctor_signal_ready",
+        doctorId: patient.doctorId,
+        patientId: patient.id
+      });
+    },
+    [dispatch]
+  );
+
+  const handleSimulateDoctorEnd = useCallback(
+    (patient: Patient) => {
+      dispatch({
+        type: "doctor_end_consultation",
+        doctorId: patient.doctorId,
+        patientId: patient.id
+      });
+      dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+    },
+    [dispatch]
+  );
+
+  const handleSimulateLabReturn = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "patient_returns_with_reports", patientId: patient.id });
+      dispatch({ type: "bind_desk", patientId: patient.id, mode: "handoff" });
+    },
+    [dispatch]
+  );
+
+  const handleSetDepartingFlag = useCallback(
+    (
+      patient: Patient,
+      key: "rxPrinted" | "labFormPrinted" | "nextVisitSlipGiven" | "medicinesHandedOver",
+      value: boolean
+    ) => {
+      dispatch({ type: "set_departing_flag", patientId: patient.id, key, value });
+    },
+    [dispatch]
+  );
+
+  const handleMarkPaymentDone = useCallback(
+    (patient: Patient) => {
+      dispatch({
+        type: "set_departing_status",
+        patientId: patient.id,
+        key: "payment",
+        value: "done"
+      });
+    },
+    [dispatch]
+  );
+
+  const handleRequeueForDoctor = useCallback(
+    (patient: Patient, reason: RequeueReason) => {
+      dispatch({ type: "requeue_for_doctor", patientId: patient.id, reason });
+      dispatch({ type: "bind_desk", patientId: null, mode: "idle" });
+    },
+    [dispatch]
+  );
+
+  const handleRejoinFromMissed = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "rejoin_from_missed", patientId: patient.id });
+    },
+    [dispatch]
+  );
+
+  const handleSendCheckSms = useCallback(
+    (patient: Patient) => {
+      dispatch({ type: "send_check_sms", patientId: patient.id });
+    },
+    [dispatch]
+  );
+
+  const handleOpenCommandPalette = useCallback(() => setPaletteOpen(true), []);
+
+  const handlePickFromPalette = useCallback(
+    (patient: Patient) => {
+      setPaletteOpen(false);
+      // Route based on lifecycle.
+      if (
+        patient.lifecycle === "arriving_pending_vitals" ||
+        patient.lifecycle === "arriving_returned_from_missed"
+      ) {
+        handleDeskBind(patient, "vitals");
+      } else if (
+        patient.lifecycle === "departing_lab_pending" ||
+        patient.lifecycle === "departing_payment_pending" ||
+        patient.lifecycle === "departing_pharmacy_pending" ||
+        patient.lifecycle === "departing_ready_to_close"
+      ) {
+        handleDeskBind(patient, "checkout");
+      } else if (
+        patient.lifecycle === "missed_first_strike" ||
+        patient.lifecycle === "buffer_normal" ||
+        patient.lifecycle === "buffer_lab_review" ||
+        patient.lifecycle === "buffer_doctor_recall" ||
+        patient.lifecycle === "handoff_ready"
+      ) {
+        // Lobby patients (waiting / missed / currently being called) all open
+        // The Desk in handoff mode.
+        handlePickForHandoff(patient);
+      } else if (patient.lifecycle === "closed" || patient.lifecycle === "skipped_no_show") {
+        // Closed/no-show visits open as a read-only summary on The Desk.
+        dispatch({ type: "bind_desk", patientId: patient.id, mode: "detail" });
+        if (patient.doctorId !== state.selectedDoctorId) {
+          dispatch({ type: "select_doctor", doctorId: patient.doctorId });
+        }
+      } else {
+        // Serving: just focus the doctor column.
+        dispatch({ type: "select_doctor", doctorId: patient.doctorId });
+      }
+    },
+    [dispatch, handleDeskBind, handlePickForHandoff, state.selectedDoctorId]
+  );
+
+  const clinicName = clinic?.name ?? "QCare Clinic";
 
   return (
     <section
-      aria-label={`${clinic?.name ?? "Clinic"} receptionist workspace`}
+      aria-label={`${clinicName} receptionist workspace`}
       className={styles.workspace}
     >
       <div className={styles.bgGlow} />
 
       <GlobalNav
-        doctorOptions={doctorOptions}
-        isQueuePaused={isQueuePaused}
-        onSelectDoctor={(doctorId) => {
-          setSearchValue("");
-          setDoctorIndex(Math.max(doctorOptions.findIndex((doctor) => doctor.id === doctorId), 0))
-        }}
-        onToggleQueuePause={() => setIsQueuePaused((previous) => !previous)}
-        selectedDoctorId={selectedDoctor.id}
+        doctorOptions={state.doctors}
+        isQueuePaused={state.isQueuePaused}
+        onSelectDoctor={(doctorId) => dispatch({ type: "select_doctor", doctorId })}
+        onToggleQueuePause={() => dispatch({ type: "toggle_pause" })}
+        selectedDoctorId={state.selectedDoctorId}
       />
 
-      <FocusArea
-        focusIdentityRef={focusIdentityRef}
-        isSwapping={Boolean(swappingPatientId && swappingPatientId === activePatient.id)}
-        onCallPatient={handleCallPatient}
-        onVitalBlur={handleVitalBlur}
-        onCompleteCheckIn={handleCompleteCheckIn}
-        onTextPatient={handleTextPatient}
-        onVitalChange={handleVitalChange}
-        patient={activePatient}
-        vitals={vitals}
+      <div className={styles.grid}>
+        <Inbox
+          arriving={arriving}
+          doctorNameById={doctorNameById}
+          selectedPatientId={focusedPatient?.id ?? null}
+          getSignalPreview={(patient) =>
+            highestWeightSignal(getSignalsForPatient(patient))?.title ?? null
+          }
+          onPickArriving={handlePickArriving}
+        />
+
+        <TheDesk
+          mode={state.desk.mode}
+          patient={focusedPatient}
+          doctor={selectedDoctor ?? null}
+          signals={focusedSignals}
+          isQueuePaused={state.isQueuePaused}
+          requiresVitalsBeforeQueue={
+            state.capabilities.vitalsAtReception &&
+            state.capabilities.vitalsRequirement === "required_before_queue"
+          }
+          onVitalChange={handleVitalChange}
+          onVitalBlur={handleVitalBlur}
+          onCompleteCheckIn={handleCompleteCheckIn}
+          onVitalsRequiredAttempt={handleVitalsRequiredAttempt}
+          onTextPatient={handleSendCheckSms}
+          onCompleteCheckout={handleCompleteCheckout}
+          onSetDepartingFlag={handleSetDepartingFlag}
+          onMarkPaymentDone={handleMarkPaymentDone}
+          onRequeueForDoctor={handleRequeueForDoctor}
+          onOpenCommandPalette={handleOpenCommandPalette}
+          onInitiateHandoff={handleInitiateHandoff}
+          onConfirmHandoff={handleConfirmHandoff}
+          onMarkMissing={handleMarkMissing}
+          onCloseNoShow={handleCloseNoShow}
+        />
+
+        <ClinicFlow
+          doctor={selectedDoctor ?? null}
+          serving={flowForSelected.serving}
+          handoff={flowForSelected.handoff}
+          buffer={flowForSelected.buffer}
+          isQueuePaused={state.isQueuePaused}
+          banner={state.banner}
+          selectedPatientId={focusedPatient?.id ?? null}
+          closedToday={closedToday}
+          doctorNameById={doctorNameById}
+          onPickForHandoff={handlePickForHandoff}
+          onOpenClosedDetail={handlePickFromPalette}
+        />
+      </div>
+
+      <UndoToast action={undo} onUndo={clearUndo} onDismiss={clearUndo} />
+
+      <SimulatorFab
+        selectedDoctor={selectedDoctor ?? null}
+        serving={flowForSelected.serving}
+        handoff={flowForSelected.handoff}
+        buffer={flowForSelected.buffer}
+        closedToday={closedToday}
+        onSimulateDoctorReady={handleSimulateDoctorReady}
+        onSimulateDoctorEnd={handleSimulateDoctorEnd}
+        onSimulateLabReturn={handleSimulateLabReturn}
       />
 
-      <ContextArea
-        currentlyServing={currentlyServing}
-        isTransferRunning={isTransferRunning}
-        onCallNext={handleCallNext}
-        onCheckIn={promoteToFocus}
-        onSearchChange={setSearchValue}
-        readyQueue={readyQueue}
-        searchValue={searchValue}
-        totalUpcoming={doctorUpcoming.length}
-        upcomingPatients={visibleUpcoming}
-      />
-
+      {paletteOpen ? (
+        <CommandPalette
+          patients={state.patients}
+          doctorNameById={doctorNameById}
+          onClose={() => setPaletteOpen(false)}
+          onPick={handlePickFromPalette}
+        />
+      ) : null}
     </section>
   );
 }
